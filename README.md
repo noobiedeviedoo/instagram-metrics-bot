@@ -14,6 +14,10 @@ a proposito, aunque los dos hablan con la misma cuenta de Instagram — asi cada
 uno tiene su propio repo, su propio cron y sus propios secrets, y un fallo en
 uno no afecta al otro.
 
+## Esquema
+
+![Esquema del bot de metricas de Instagram y del analisis semanal por audio](docs/esquema-bot.svg)
+
 ## Arquitectura
 
 **Entorno:** GitHub Actions (gratuito, sin mantenimiento, no depende de que
@@ -39,12 +43,21 @@ conflictos de git si se ejecuta mas de una vez seguida.
 
 ## Estado
 
-Validado contra la API real desde el 2026-08-04: `fetch_metrics.py` funciona
-(21 publicaciones, metricas de cuenta y de posts llegando bien, incluidos
-seguidores reales via `fetch_account_fields()` — la metrica de insights
-`follower_count` no daba datos ni con `metric_type=total_value`, asi que
-seguidores/num. de publicaciones se piden directo al perfil en vez de a
-`/insights`).
+- `fetch_metrics.py` — validado contra la API real desde el 2026-08-04 (21
+  publicaciones, metricas de cuenta y de posts llegando bien, incluidos
+  seguidores reales via `fetch_account_fields()` — la metrica de insights
+  `follower_count` no daba datos ni con `metric_type=total_value`, asi que
+  seguidores/num. de publicaciones se piden directo al perfil en vez de a
+  `/insights`).
+- `send_weekly_audio.py` / `speak-analysis.yml` — probado de punta a punta el
+  2026-08-04 con un analisis escrito a mano: genero el audio y llego bien por
+  Telegram.
+- **Pendiente:** la tarea programada semanal de Cowork (el paso 2 del flujo
+  de abajo, el que hace que Claude escriba el analisis solo cada lunes sin
+  que se lo pidas) todavia no esta creada — el intento de crearla fue
+  rechazado, probablemente por guardar el token de GitHub en texto plano
+  dentro del archivo de la tarea. Mientras se resuelve, puedes pedirme el
+  analisis en cualquier momento en una conversacion normal (ver mas abajo).
 
 ## Puesta en marcha (pasos que tienes que hacer tu)
 
@@ -95,11 +108,17 @@ de texto-a-voz (`tts-telegram-bot`). Son tres piezas encadenadas, cada una
 con su propio motivo para existir por separado:
 
 1. **`fetch-metrics.yml`** (lunes 07:00 UTC) — como antes, actualiza los CSV.
-2. **Tarea programada de Cowork** (lunes, un rato despues) — Claude hace
-   `git pull`, lee los CSV frescos, escribe el analisis en `weekly_analysis.txt`
-   y hace `git push`. Esta parte necesita que Claude tenga acceso de
-   lectura/escritura al repo (un token de GitHub de solo este repo, guardado
-   en `.git/config` — no en ningun archivo del repo, no se sube a GitHub).
+2. **Tarea programada de Cowork** (lunes, un rato despues — pendiente de
+   crear, ver "Estado" arriba) — Claude hace `git pull`, lee los CSV frescos,
+   escribe el analisis en `weekly_analysis.txt` y hace `git push`. Para esto
+   Claude usa un token de GitHub *fine-grained*, limitado solo a este repo y
+   solo con permiso `Contents: Read and write` (sin `workflow`, a proposito).
+   El token se pone en el remote de git justo antes de cada `pull`/`push` y
+   se quita otra vez inmediatamente despues — no se queda guardado de forma
+   permanente en `.git/config`, porque esa carpeta la compartes tu tambien
+   (si el token se quedara puesto, tus propios `git push` fallarian para
+   cualquier cambio en `.github/workflows/`, que es justo lo que paso la
+   primera vez que se probo).
 3. **`speak-analysis.yml`** (lunes 10:00 UTC) — lee `weekly_analysis.txt`,
    genera el audio con `edge-tts` (la misma libreria que usa `tts-telegram-bot`)
    y lo manda por Telegram. Solo manda audio si el texto cambio desde el
