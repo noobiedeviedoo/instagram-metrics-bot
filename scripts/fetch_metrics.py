@@ -198,7 +198,7 @@ def main():
     since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     print(f"Listando publicaciones desde {since.date()}...")
     try:
-        media_items = fetch_recent_media(account_id, access_token)
+        media_items = fetch_recent_media(account_id, access_token, since)
     except requests.RequestException as exc:
         sys.exit(f"Error listando publicaciones: {exc}")
     print(f"  {len(media_items)} publicaciones encontradas")
