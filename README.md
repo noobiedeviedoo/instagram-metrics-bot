@@ -52,12 +52,17 @@ conflictos de git si se ejecuta mas de una vez seguida.
 - `send_weekly_audio.py` / `speak-analysis.yml` — probado de punta a punta el
   2026-08-04 con un analisis escrito a mano: genero el audio y llego bien por
   Telegram.
-- **Pendiente:** la tarea programada semanal de Cowork (el paso 2 del flujo
-  de abajo, el que hace que Claude escriba el analisis solo cada lunes sin
-  que se lo pidas) todavia no esta creada — el intento de crearla fue
-  rechazado, probablemente por guardar el token de GitHub en texto plano
-  dentro del archivo de la tarea. Mientras se resuelve, puedes pedirme el
-  analisis en cualquier momento en una conversacion normal (ver mas abajo).
+- `analyze_metrics.py` — probado con la API simulada (mocks), pendiente de
+  probar contra la API real de Anthropic — falta que se ejecute una vez en
+  GitHub Actions con `ANTHROPIC_API_KEY` configurada (ver mas abajo).
+
+**Nota sobre una vuelta atras:** la primera version de esto usaba una tarea
+programada de Cowork para que Claude escribiera el analisis. Se descarto:
+esas tareas solo corren si tienes la app de Cowork abierta en ese momento, y
+si no, se posponen a cuando la abras — eso rompia la idea de que todo el
+bot funcione sin depender de tu ordenador. Ahora el analisis lo pide
+directamente `analyze_metrics.py` a la API de Claude, dentro del mismo run
+de GitHub Actions — sin Cowork de por medio para nada del flujo semanal.
 
 ## Puesta en marcha (pasos que tienes que hacer tu)
 
@@ -102,54 +107,68 @@ Pestana **Actions** del repo → **Recoger metricas de Instagram (programado)**
 
 ## Analisis semanal por audio (Telegram)
 
-Ademas de guardar los datos, cada semana Claude los analiza de verdad (no una
-plantilla de numeros) y te manda el resultado como audio a tu bot de Telegram
-de texto-a-voz (`tts-telegram-bot`). Son tres piezas encadenadas, cada una
-con su propio motivo para existir por separado:
+Ademas de guardar los datos, cada semana se analizan de verdad (llamando a la
+API de Claude, no una plantilla de numeros fija) y el resultado te llega como
+audio a tu bot de Telegram de texto-a-voz (`tts-telegram-bot`). Todo el flujo
+vive en GitHub Actions — no depende de que tengas Cowork ni el ordenador
+encendidos:
 
-1. **`fetch-metrics.yml`** (lunes 07:00 UTC) — como antes, actualiza los CSV.
-2. **Tarea programada de Cowork** (lunes, un rato despues — pendiente de
-   crear, ver "Estado" arriba) — Claude hace `git pull`, lee los CSV frescos,
-   escribe el analisis en `weekly_analysis.txt` y hace `git push`. Para esto
-   Claude usa un token de GitHub *fine-grained*, limitado solo a este repo y
-   solo con permiso `Contents: Read and write` (sin `workflow`, a proposito).
-   El token se pone en el remote de git justo antes de cada `pull`/`push` y
-   se quita otra vez inmediatamente despues — no se queda guardado de forma
-   permanente en `.git/config`, porque esa carpeta la compartes tu tambien
-   (si el token se quedara puesto, tus propios `git push` fallarian para
-   cualquier cambio en `.github/workflows/`, que es justo lo que paso la
-   primera vez que se probo).
-3. **`speak-analysis.yml`** (lunes 10:00 UTC) — lee `weekly_analysis.txt`,
-   genera el audio con `edge-tts` (la misma libreria que usa `tts-telegram-bot`)
-   y lo manda por Telegram. Solo manda audio si el texto cambio desde el
-   ultimo envio (compara un hash guardado en `.last_sent_analysis_hash`), asi
-   que ejecutarlo dos veces seguidas no te duplica el mensaje.
+1. **`fetch-metrics.yml`** (lunes 07:00 UTC) corre dos scripts seguidos, en el
+   mismo run:
+   - `fetch_metrics.py` — actualiza `account_metrics.csv` y `media_metrics.csv`,
+     como antes.
+   - `analyze_metrics.py` — le pasa esos CSV a la API de Claude (Messages API)
+     y guarda la respuesta en `weekly_analysis.txt`. Si este paso falla (p.ej.
+     la API de Anthropic caida), no bloquea el commit de los CSV — se marca
+     como fallido en el log, pero los datos se guardan igual.
+   - Al final se comitean juntos `account_metrics.csv`, `media_metrics.csv` y
+     `weekly_analysis.txt`.
+2. **`speak-analysis.yml`** (lunes 10:00 UTC, tres horas de margen) — lee
+   `weekly_analysis.txt`, genera el audio con `edge-tts` (la misma libreria
+   que usa `tts-telegram-bot`) y lo manda por Telegram. Solo manda audio si el
+   texto cambio desde el ultimo envio (compara un hash guardado en
+   `.last_sent_analysis_hash`), asi que ejecutarlo dos veces seguidas no te
+   duplica el mensaje.
 
-Por que en tres pasos y no uno: el entorno donde corre Claude tiene bloqueado
-el acceso a los servicios de texto-a-voz (lo probe con varios, todos
-rechazados por la politica de red), pero GitHub Actions tiene internet
-completo. Y el analisis en si necesita el razonamiento de Claude, que GitHub
-Actions no tiene. Cada pieza corre donde puede hacer su parte.
+Por que en dos workflows y no uno: son responsabilidades distintas (recoger
+datos + analizar vs. convertir a voz + avisar), y separarlos permite que uno
+falle sin tumbar al otro, ademas de dejar margen de tiempo entre los dos sin
+complicar el cron.
 
 ### Secrets nuevos para este paso
 
 Ademas de `IG_ACCESS_TOKEN` e `IG_BUSINESS_ACCOUNT_ID`, anade en
 **Settings → Secrets and variables → Actions**:
 
+- `ANTHROPIC_API_KEY` — creala en [console.anthropic.com](https://console.anthropic.com/settings/keys).
+  Coste: una llamada semanal a un par de CSV pequeños, del orden de centimos
+  al mes con el modelo por defecto (`claude-sonnet-5` — cambialo con la
+  variable `ANTHROPIC_MODEL` en el workflow si prefieres uno mas barato).
 - `TELEGRAM_BOT_TOKEN` — el token de tu bot `tts-telegram-bot` (el mismo que
   tienes en `BOTS/tts-telegram-bot/.env`).
 - `TELEGRAM_CHAT_ID` — tu chat_id de Telegram.
 
-**Aviso de seguridad:** ese mismo token esta ahora mismo escrito en texto
-plano en `BOTS/tts-telegram-bot/README.md`, ademas de en su `.env`. No pasa
-nada mientras esa carpeta no sea un repo de git publico, pero conviene
-quitarlo del README y dejarlo solo en `.env` (que si esta en `.gitignore`).
+**Aviso de seguridad:** ese mismo token de Telegram esta ahora mismo escrito
+en texto plano en `BOTS/tts-telegram-bot/.env`. No pasa nada mientras esa
+carpeta no sea un repo de git publico (ya se quito la copia que habia
+tambien en su README).
 
 ## ¿Y si quiero pedirte un analisis fuera de la rutina semanal?
 
 Puedo leer `account_metrics.csv` y `media_metrics.csv` cuando quieras, en
-cualquier conversacion, y darte un analisis al momento — no hace falta
-esperar al lunes.
+cualquier conversacion normal con Claude, y darte un analisis al momento —
+no hace falta esperar al lunes ni tocar la API por separado.
+
+## Sobre el token de GitHub que le diste a Claude
+
+Ese *fine-grained PAT* (solo este repo, permiso `Contents: Read and write`)
+ya no hace falta para el flujo semanal — con el rediseño de arriba, todo lo
+recurrente corre dentro de GitHub Actions usando su propio token integrado,
+sin que Claude necesite tocar el repo entre semana. Sigue siendo util para
+que Claude pueda hacer cambios puntuales (como los de hoy) sin pedirte que
+copies y pegues comandos de git constantemente, asi que puedes dejarlo activo
+si te viene bien — o revocarlo desde GitHub cuando quieras, no rompe nada de
+lo automatico.
 
 ## Estructura del repo
 
@@ -157,13 +176,16 @@ esperar al lunes.
 instagram-metrics-bot/
 ├── scripts/
 │   ├── fetch_metrics.py         # Pide insights y los anade a los CSV
+│   ├── analyze_metrics.py       # Le pasa los CSV a la API de Claude y escribe weekly_analysis.txt
 │   └── send_weekly_audio.py     # Convierte weekly_analysis.txt a audio y lo manda
 ├── .github/workflows/
-│   ├── fetch-metrics.yml        # Cron semanal: actualiza los CSV
+│   ├── fetch-metrics.yml        # Cron semanal: actualiza los CSV Y el analisis (mismo run)
 │   └── speak-analysis.yml       # Cron semanal: manda el audio si hay analisis nuevo
+├── docs/
+│   └── esquema-bot.svg          # Diagrama del flujo completo (ver "Esquema" arriba)
 ├── account_metrics.csv          # Se crea solo en la primera ejecucion
 ├── media_metrics.csv            # Se crea solo en la primera ejecucion
-├── weekly_analysis.txt          # Lo escribe Claude cada semana (tarea de Cowork)
+├── weekly_analysis.txt          # Lo escribe analyze_metrics.py cada semana
 ├── .last_sent_analysis_hash     # Lo escribe speak-analysis.yml, evita duplicados
 ├── requirements.txt
 ├── .env.example

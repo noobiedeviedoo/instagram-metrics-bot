@@ -31,13 +31,23 @@ jobs:
           IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
         run: python scripts/fetch_metrics.py
 
-      - name: Commit y push de los CSV actualizados
+      - name: Analizar los datos con la API de Claude
+        # continue-on-error: si esto falla (p.ej. la API de Anthropic caida,
+        # o problemas con la key) no debe bloquear el commit de los CSV, que
+        # es la parte mas importante. El paso queda marcado como fallido en
+        # el log de todas formas, para que se note.
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/analyze_metrics.py
+
+      - name: Commit y push de los CSV y el analisis actualizados
         run: |
-          git config user.name "instagram-metrics-bot" 
+          git config user.name "instagram-metrics-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add account_metrics.csv media_metrics.csv
+          git add account_metrics.csv media_metrics.csv weekly_analysis.txt
           if ! git diff --cached --quiet; then
-            git commit -m "Metricas: actualizacion automatica"
+            git commit -m "Metricas y analisis: actualizacion automatica"
             if ! git push; then
               echo "Push rechazado, sincronizando con git pull..."
               git pull --no-edit --no-rebase
