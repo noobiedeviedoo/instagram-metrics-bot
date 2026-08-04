@@ -1,0 +1,49 @@
+name: Mandar analisis semanal por audio (Telegram)
+
+on:
+  schedule:
+    # Lunes 10:00 UTC — dos horas despues del cron de fetch-metrics.yml
+    # (07:00 UTC), para dar tiempo a que la tarea programada de Cowork lea
+    # los CSV frescos y escriba weekly_analysis.txt antes de que esto corra.
+    - cron: "0 10 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  speak-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Generar audio y mandarlo por Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/send_weekly_audio.py
+
+      - name: Commit del marcador de "ya enviado"
+        run: |
+          git config user.name "instagram-metrics-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .last_sent_analysis_hash
+          if ! git diff --cached --quiet; then
+            git commit -m "Marca el analisis semanal como enviado"
+            if ! git push; then
+              echo "Push rechazado, sincronizando con git pull..."
+              git pull --no-edit --no-rebase
+              git push
+            fi
+          else
+            echo "Sin cambios que commitear."
+          fi

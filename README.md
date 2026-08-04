@@ -37,19 +37,14 @@ Ambos CSV son de solo-anadir (append-only), igual que `published_log.csv` del
 otro bot, y tienen `merge=union` en `.gitattributes` para que nunca haya
 conflictos de git si se ejecuta mas de una vez seguida.
 
-## Aviso importante
+## Estado
 
-Este script se ha escrito sin poder probarlo contra la API real de Instagram
-(el entorno donde lo cree tiene bloqueada la salida a `graph.instagram.com`).
-La logica sigue la documentacion oficial de Meta, pero **la primera vez**
-deberias:
-
-1. Lanzarlo a mano desde GitHub Actions (`workflow_dispatch`, boton "Run
-   workflow").
-2. Revisar el log de esa ejecucion.
-3. Si alguna metrica sale como "no soportada" o similar, dimelo (o pegame el
-   error) y ajusto la lista en `scripts/fetch_metrics.py` — son listas
-   sueltas (`ACCOUNT_METRICS`, `MEDIA_METRICS`) faciles de tocar.
+Validado contra la API real desde el 2026-08-04: `fetch_metrics.py` funciona
+(21 publicaciones, metricas de cuenta y de posts llegando bien, incluidos
+seguidores reales via `fetch_account_fields()` — la metrica de insights
+`follower_count` no daba datos ni con `metric_type=total_value`, asi que
+seguidores/num. de publicaciones se piden directo al perfil en vez de a
+`/insights`).
 
 ## Puesta en marcha (pasos que tienes que hacer tu)
 
@@ -92,24 +87,65 @@ secret**. Anade:
 Pestana **Actions** del repo → **Recoger metricas de Instagram (programado)**
 → **Run workflow**. Revisa el log como se explica arriba.
 
-## Y despues, ¿como te asesoro con esto?
+## Analisis semanal por audio (Telegram)
 
-Una vez haya unas semanas de datos en `account_metrics.csv` y
-`media_metrics.csv`, puedo leerlos cuando quieras y darte un analisis (que
-esta funcionando, que dias/formatos rinden mejor, si el alcance esta subiendo
-o bajando...). Si quieres que te lo mande yo solo cada semana sin que lo
-pidas, dimelo y monto una rutina programada de Cowork para eso.
+Ademas de guardar los datos, cada semana Claude los analiza de verdad (no una
+plantilla de numeros) y te manda el resultado como audio a tu bot de Telegram
+de texto-a-voz (`tts-telegram-bot`). Son tres piezas encadenadas, cada una
+con su propio motivo para existir por separado:
+
+1. **`fetch-metrics.yml`** (lunes 07:00 UTC) — como antes, actualiza los CSV.
+2. **Tarea programada de Cowork** (lunes, un rato despues) — Claude hace
+   `git pull`, lee los CSV frescos, escribe el analisis en `weekly_analysis.txt`
+   y hace `git push`. Esta parte necesita que Claude tenga acceso de
+   lectura/escritura al repo (un token de GitHub de solo este repo, guardado
+   en `.git/config` — no en ningun archivo del repo, no se sube a GitHub).
+3. **`speak-analysis.yml`** (lunes 10:00 UTC) — lee `weekly_analysis.txt`,
+   genera el audio con `edge-tts` (la misma libreria que usa `tts-telegram-bot`)
+   y lo manda por Telegram. Solo manda audio si el texto cambio desde el
+   ultimo envio (compara un hash guardado en `.last_sent_analysis_hash`), asi
+   que ejecutarlo dos veces seguidas no te duplica el mensaje.
+
+Por que en tres pasos y no uno: el entorno donde corre Claude tiene bloqueado
+el acceso a los servicios de texto-a-voz (lo probe con varios, todos
+rechazados por la politica de red), pero GitHub Actions tiene internet
+completo. Y el analisis en si necesita el razonamiento de Claude, que GitHub
+Actions no tiene. Cada pieza corre donde puede hacer su parte.
+
+### Secrets nuevos para este paso
+
+Ademas de `IG_ACCESS_TOKEN` e `IG_BUSINESS_ACCOUNT_ID`, anade en
+**Settings → Secrets and variables → Actions**:
+
+- `TELEGRAM_BOT_TOKEN` — el token de tu bot `tts-telegram-bot` (el mismo que
+  tienes en `BOTS/tts-telegram-bot/.env`).
+- `TELEGRAM_CHAT_ID` — tu chat_id de Telegram.
+
+**Aviso de seguridad:** ese mismo token esta ahora mismo escrito en texto
+plano en `BOTS/tts-telegram-bot/README.md`, ademas de en su `.env`. No pasa
+nada mientras esa carpeta no sea un repo de git publico, pero conviene
+quitarlo del README y dejarlo solo en `.env` (que si esta en `.gitignore`).
+
+## ¿Y si quiero pedirte un analisis fuera de la rutina semanal?
+
+Puedo leer `account_metrics.csv` y `media_metrics.csv` cuando quieras, en
+cualquier conversacion, y darte un analisis al momento — no hace falta
+esperar al lunes.
 
 ## Estructura del repo
 
 ```
 instagram-metrics-bot/
 ├── scripts/
-│   └── fetch_metrics.py       # Pide insights y los anade a los CSV
+│   ├── fetch_metrics.py         # Pide insights y los anade a los CSV
+│   └── send_weekly_audio.py     # Convierte weekly_analysis.txt a audio y lo manda
 ├── .github/workflows/
-│   └── fetch-metrics.yml      # Cron semanal que lo ejecuta
-├── account_metrics.csv        # Se crea solo en la primera ejecucion
-├── media_metrics.csv          # Se crea solo en la primera ejecucion
+│   ├── fetch-metrics.yml        # Cron semanal: actualiza los CSV
+│   └── speak-analysis.yml       # Cron semanal: manda el audio si hay analisis nuevo
+├── account_metrics.csv          # Se crea solo en la primera ejecucion
+├── media_metrics.csv            # Se crea solo en la primera ejecucion
+├── weekly_analysis.txt          # Lo escribe Claude cada semana (tarea de Cowork)
+├── .last_sent_analysis_hash     # Lo escribe speak-analysis.yml, evita duplicados
 ├── requirements.txt
 ├── .env.example
 ├── .gitattributes
