@@ -3,11 +3,18 @@
 Bot de audio semanal - convierte a voz el analisis y lo manda por Telegram.
 
 Pensado para ejecutarse desde GitHub Actions, en un cron posterior al de
-fetch_metrics.py (necesita que el analisis ya este escrito en el repo antes
-de correr). El analisis en si NO lo escribe este script: lo escribe Claude,
-en una tarea programada de Cowork, en el archivo `weekly_analysis.txt` de la
-raiz del repo (mismo patron que account_metrics.csv/media_metrics.csv: este
-script solo lee lo que ya esta en el repo, no llama a ninguna IA).
+fetch-metrics.yml (necesita que el analisis ya este escrito en el repo antes
+de correr). El analisis en si NO lo escribe este script: lo escribe
+analyze_metrics.py, dentro del mismo run de fetch-metrics.yml, en el archivo
+`weekly_analysis.txt` de la raiz del repo (mismo patron que
+account_metrics.csv/media_metrics.csv: este script solo lee lo que ya esta
+en el repo, no llama a ninguna IA).
+
+Manda dos mensajes por Telegram: el texto completo del analisis (sendMessage,
+hasta 4096 caracteres) y el audio generado con edge-tts (sendAudio). Antes
+el texto iba como caption del audio, pero el caption de Telegram solo admite
+1024 caracteres y el analisis (150-250 palabras) casi siempre lo supera, asi
+que se cortaba a mitad de frase.
 
 Para no reenviar el mismo audio si el workflow se ejecuta mas de una vez
 antes de que haya analisis nuevo, se guarda un hash del ultimo texto enviado
@@ -36,11 +43,27 @@ ANALYSIS_PATH = REPO_ROOT / "weekly_analysis.txt"
 HASH_MARKER_PATH = REPO_ROOT / ".last_sent_analysis_hash"
 
 
-def send_audio_telegram(audio_path: str, token: str, chat_id: str, caption: str = ""):
+def send_text_telegram(texto: str, token: str, chat_id: str):
+    """Manda el analisis completo como mensaje de texto normal. Telegram
+    admite hasta 4096 caracteres en un mensaje — de sobra para un analisis
+    de 150-250 palabras (unos 1500-1700 caracteres), a diferencia del
+    caption de un audio, que solo admite 1024 y se quedaba cortando el
+    texto a mitad de palabra."""
+    resp = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data={"chat_id": chat_id, "text": texto[:4096]},
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f"Respuesta de Telegram ({resp.status_code}): {resp.text}")
+    resp.raise_for_status()
+
+
+def send_audio_telegram(audio_path: str, token: str, chat_id: str):
     with open(audio_path, "rb") as audio:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendAudio",
-            data={"chat_id": chat_id, "title": "Analisis semanal de Instagram", "caption": caption[:1024]},
+            data={"chat_id": chat_id, "title": "Analisis semanal de Instagram"},
             files={"audio": audio},
             timeout=60,
         )
@@ -86,10 +109,11 @@ def main():
 
         asyncio.run(generar())
 
+        print("Mandando el texto completo por Telegram...")
+        send_text_telegram(texto, token, chat_id)
+
         print("Mandando audio por Telegram...")
-        # El caption de Telegram tiene limite de 1024 caracteres; el texto
-        # completo ya va hablado en el audio, el caption es solo un resumen.
-        send_audio_telegram(ruta_audio, token, chat_id, caption=texto[:1000])
+        send_audio_telegram(ruta_audio, token, chat_id)
         print("Enviado correctamente.")
     finally:
         if ruta_audio and os.path.exists(ruta_audio):
