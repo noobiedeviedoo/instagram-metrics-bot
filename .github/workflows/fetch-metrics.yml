@@ -33,7 +33,7 @@ jobs:
 
       - name: Commit y push de los CSV actualizados
         run: |
-          git config user.name "instagram-metrics-bot"
+          git config user.name "instagram-metrics-bot" 
           git config user.email "actions@users.noreply.github.com"
           git add account_metrics.csv media_metrics.csv
           if ! git diff --cached --quiet; then
