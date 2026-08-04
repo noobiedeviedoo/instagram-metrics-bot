@@ -135,12 +135,17 @@ GitHub Actions — no depende de que tengas Cowork ni el ordenador encendidos:
      (hash en `.last_sent_analysis_hash`), asi que ejecutarlo dos veces
      seguidas no te duplica el mensaje.
    - `send_weekly_chart.py` — con `matplotlib`, dibuja dos paneles a partir de
-     los mismos CSV (sin llamar a ninguna API): la evolucion de
-     `followers_count` dia a dia, y las publicaciones con mas alcance ahora
-     mismo (top 8), y manda la imagen por Telegram. Con pocas semanas de
-     historico el panel de seguidores se vera casi vacio — es normal, se
-     vuelve mas util cuanto mas tiempo lleve corriendo el bot. Mismo patron
-     anti-duplicados que el audio, con su propio hash en
+     los mismos CSV (sin llamar a ninguna API). El primero es la "Tendencia
+     semanal": un punto por dia con 4 lineas — tasa de interaccion (%, eje
+     izquierdo, valor real) y seguidores / alcance / reproducciones-por-
+     alcance (eje derecho, INDEXADAS a 100 sobre el primer dato, porque son
+     cifras en escalas muy distintas entre si y lo que importa es cuanto
+     sube o baja cada una, no su valor absoluto). El segundo panel es igual
+     que antes: las publicaciones con mas alcance ahora mismo (top 8). Con
+     pocas semanas de historico el panel de tendencia se vera casi vacio (un
+     solo punto por linea, las 3 indexadas superpuestas en 100) — es normal,
+     se vuelve mas util cuanto mas tiempo lleve corriendo el bot. Mismo
+     patron anti-duplicados que el audio, con su propio hash en
      `.last_sent_chart_hash` (los datos del grafico pueden cambiar en una
      semana en la que el texto no cambie, o al reves). Si este paso falla no
      bloquea el commit del marcador del audio (`continue-on-error`).
