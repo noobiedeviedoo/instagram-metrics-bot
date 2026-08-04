@@ -106,7 +106,7 @@ def main():
         },
         json={
             "model": model,
-            "max_tokens": 700,
+            "max_tokens": 4096,
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=90,
