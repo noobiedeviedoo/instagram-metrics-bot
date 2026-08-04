@@ -28,11 +28,14 @@ El token necesita, ademas de los permisos que ya tenga para publicar, estos
 dos: instagram_business_basic e instagram_business_manage_insights — ver
 README para como anadirlos.
 
-Nota: este script no se ha podido probar contra la API real durante su
-creacion (el entorno donde se escribio no tiene salida a graph.instagram.com).
-La primera ejecucion deberia lanzarse a mano (workflow_dispatch) y revisar
-el log — si Meta devuelve error de "metrica no soportada" para alguna de las
-listas de abajo, hay que quitarla o ajustarla.
+Nota: la parte de metricas por publicacion (MEDIA_METRICS) ya se probo
+contra la API real y funciona (primera ejecucion: 21 publicaciones, 147
+filas). La lista de metricas de cuenta (ACCOUNT_METRICS) se ajusto despues,
+a partir de la documentacion oficial de Meta, tras ver que la mitad fallaban
+(profile_views y website_clicks estan deprecadas desde la v22; accounts_engaged
+y total_interactions necesitan metric_type=total_value) — este segundo ajuste
+todavia no se ha vuelto a probar en vivo, conviene relanzar el workflow a
+mano una vez mas y revisar el log.
 """
 
 import csv
@@ -54,13 +57,18 @@ GRAPH_API_BASE = "https://graph.instagram.com"
 # Metricas de cuenta (nivel perfil). Se piden una por una: si Meta rechaza
 # alguna (por ejemplo, cuentas con menos de 100 seguidores no tienen todas
 # las metricas disponibles), las demas se guardan igual.
+#
+# 'profile_views' y 'website_clicks' se han quitado de esta lista: Meta las
+# deprecó en la v22 de la API (sustituidas por 'views', 'reach',
+# 'follower_count' y 'reposts' — ver Instagram Platform Changelog). Pedirlas
+# siempre devuelve error, no es un problema de esta cuenta en concreto.
 ACCOUNT_METRICS = [
     "reach",
-    "profile_views",
+    "views",
+    "follower_count",
+    "reposts",
     "accounts_engaged",
     "total_interactions",
-    "website_clicks",
-    "follower_count",
 ]
 
 # Metricas por publicacion.
@@ -105,15 +113,20 @@ def append_csv_rows(path: Path, header: list[str], rows: list[list]):
 
 
 def fetch_account_insights(account_id: str, access_token: str) -> list[list]:
-    """Pide cada metrica de ACCOUNT_METRICS por separado (period=day). Si una
-    falla, se avisa por consola y se sigue con las demas — nunca se corta la
-    ejecucion entera por una sola metrica no soportada."""
+    """Pide cada metrica de ACCOUNT_METRICS por separado (period=day,
+    metric_type=total_value — formato que exigen las metricas de cuenta
+    actuales de Meta; el formato antiguo de serie temporal sin metric_type
+    ya no vale para accounts_engaged/total_interactions y da valores
+    enganosos, tipo 0, para follower_count). Si una metrica falla, se avisa
+    por consola y se sigue con las demas — nunca se corta la ejecucion
+    entera por una sola metrica no soportada."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = []
     for metric in ACCOUNT_METRICS:
         params = {
             "metric": metric,
             "period": "day",
+            "metric_type": "total_value",
             "access_token": access_token,
         }
         resp = requests.get(f"{GRAPH_API_BASE}/{account_id}/insights", params=params, timeout=30)
@@ -121,11 +134,17 @@ def fetch_account_insights(account_id: str, access_token: str) -> list[list]:
             print(f"Aviso: no se pudo leer la metrica de cuenta '{metric}': {resp.text}")
             continue
         for entry in resp.json().get("data", []):
-            values = entry.get("values", [])
-            if not values:
+            total_value = entry.get("total_value", {})
+            value = total_value.get("value")
+            if value is None:
+                # Por si alguna metrica concreta devuelve el formato antiguo
+                # (serie temporal) en vez de total_value.
+                values = entry.get("values", [])
+                if values:
+                    value = values[-1].get("value")
+            if value is None:
                 continue
-            latest = values[-1]
-            rows.append([now, metric, latest.get("value"), latest.get("end_time", "")])
+            rows.append([now, metric, value, ""])
     return rows
 
 
