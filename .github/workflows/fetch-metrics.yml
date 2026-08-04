@@ -1,0 +1,48 @@
+name: Recoger metricas de Instagram (programado)
+
+on:
+  schedule:
+    # Todos los lunes a las 07:00 UTC (08:00 en Espana en invierno, 09:00 en
+    # verano). Cambia el cron si prefieres otra frecuencia.
+    - cron: "0 7 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar recogida de metricas
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+        run: python scripts/fetch_metrics.py
+
+      - name: Commit y push de los CSV actualizados
+        run: |
+          git config user.name "instagram-metrics-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add account_metrics.csv media_metrics.csv
+          if ! git diff --cached --quiet; then
+            git commit -m "Metricas: actualizacion automatica"
+            if ! git push; then
+              echo "Push rechazado, sincronizando con git pull..."
+              git pull --no-edit --no-rebase
+              git push
+            fi
+          else
+            echo "Sin cambios que commitear."
+          fi

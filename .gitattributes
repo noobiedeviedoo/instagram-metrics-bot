@@ -1,0 +1,7 @@
+# account_metrics.csv y media_metrics.csv son registros de solo-anadir (cada
+# fila es "esta metrica valia esto en este momento"). Con merge=union, si dos
+# ejecuciones escriben filas nuevas casi a la vez, git las combina solas sin
+# generar nunca un conflicto que haya que resolver a mano. Mismo patron que
+# published_log.csv en el bot de publicacion.
+account_metrics.csv merge=union
+media_metrics.csv merge=union
