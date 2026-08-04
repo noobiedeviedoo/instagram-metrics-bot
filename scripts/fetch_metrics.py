@@ -54,18 +54,24 @@ MEDIA_CSV = REPO_ROOT / "media_metrics.csv"
 # igual que el bot de publicacion) solo son validos contra este host.
 GRAPH_API_BASE = "https://graph.instagram.com"
 
-# Metricas de cuenta (nivel perfil). Se piden una por una: si Meta rechaza
-# alguna (por ejemplo, cuentas con menos de 100 seguidores no tienen todas
-# las metricas disponibles), las demas se guardan igual.
+# Metricas de cuenta (nivel perfil, via /insights). Se piden una por una: si
+# Meta rechaza alguna, las demas se guardan igual.
 #
 # 'profile_views' y 'website_clicks' se han quitado de esta lista: Meta las
 # deprecó en la v22 de la API (sustituidas por 'views', 'reach',
 # 'follower_count' y 'reposts' — ver Instagram Platform Changelog). Pedirlas
 # siempre devuelve error, no es un problema de esta cuenta en concreto.
+#
+# 'follower_count' tambien se ha quitado de aqui: con metric_type=total_value
+# (el formato que necesitan accounts_engaged/total_interactions) esta metrica
+# en concreto no devuelve datos, sin dar error tampoco — probamos con una
+# cuenta de 340 seguidores y siguio sin llegar, asi que no es cosa del
+# tamano de audiencia. El numero real de seguidores se pide aparte, con
+# fetch_account_fields(), directamente al perfil (endpoint distinto al de
+# insights) — es mas simple y mas fiable.
 ACCOUNT_METRICS = [
     "reach",
     "views",
-    "follower_count",
     "reposts",
     "accounts_engaged",
     "total_interactions",
@@ -148,6 +154,25 @@ def fetch_account_insights(account_id: str, access_token: str) -> list[list]:
     return rows
 
 
+def fetch_account_fields(account_id: str, access_token: str) -> list[list]:
+    """Pide seguidores y numero de publicaciones directamente al perfil
+    (endpoint GET /{account_id}, no /insights) — mas simple y fiable que la
+    metrica de insights 'follower_count', que no esta devolviendo datos."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    params = {"fields": "followers_count,media_count", "access_token": access_token}
+    resp = requests.get(f"{GRAPH_API_BASE}/{account_id}", params=params, timeout=30)
+    if not resp.ok:
+        print(f"Aviso: no se pudo leer followers_count/media_count del perfil: {resp.text}")
+        return []
+    data = resp.json()
+    rows = []
+    if "followers_count" in data:
+        rows.append([now, "followers_count", data["followers_count"], ""])
+    if "media_count" in data:
+        rows.append([now, "media_count", data["media_count"], ""])
+    return rows
+
+
 def fetch_recent_media(account_id: str, access_token: str, since: datetime) -> list[dict]:
     """Lista publicaciones desde `since`, siguiendo paginacion. Devuelve
     id, caption y fecha de cada una."""
@@ -211,6 +236,8 @@ def main():
 
     print("Pidiendo metricas de cuenta...")
     account_rows = fetch_account_insights(account_id, access_token)
+    print("Pidiendo seguidores y numero de publicaciones del perfil...")
+    account_rows += fetch_account_fields(account_id, access_token)
     append_csv_rows(ACCOUNT_CSV, ACCOUNT_CSV_HEADER, account_rows)
     print(f"  {len(account_rows)} filas anadidas a {ACCOUNT_CSV.name}")
 
