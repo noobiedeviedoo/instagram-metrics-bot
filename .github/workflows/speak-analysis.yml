@@ -32,11 +32,28 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/send_weekly_audio.py
 
+      - name: Generar grafico y mandarlo por Telegram
+        # continue-on-error: si esto falla (p.ej. un problema de matplotlib)
+        # no debe impedir que se comitee el marcador del audio, que ya se
+        # mando bien en el paso anterior.
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/send_weekly_chart.py
+
       - name: Commit del marcador de "ya enviado"
         run: |
           git config user.name "instagram-metrics-bot"
           git config user.email "actions@users.noreply.github.com"
           git add .last_sent_analysis_hash
+          # .last_sent_chart_hash solo existe si send_weekly_chart.py llego a
+          # mandar la imagen (el paso anterior tiene continue-on-error, asi
+          # que puede no haberse creado) — con comprobacion aparte para que
+          # un "git add" a un fichero inexistente no tumbe todo este paso.
+          if [ -f .last_sent_chart_hash ]; then
+            git add .last_sent_chart_hash
+          fi
           if ! git diff --cached --quiet; then
             git commit -m "Marca el analisis semanal como enviado"
             if ! git push; then

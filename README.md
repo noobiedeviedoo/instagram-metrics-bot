@@ -55,6 +55,9 @@ conflictos de git si se ejecuta mas de una vez seguida.
 - `analyze_metrics.py` — probado con la API simulada (mocks), pendiente de
   probar contra la API real de Anthropic — falta que se ejecute una vez en
   GitHub Actions con `ANTHROPIC_API_KEY` configurada (ver mas abajo).
+- `send_weekly_chart.py` — probado en local generando el PNG contra los CSV
+  reales (347 seguidores, 21 posts), pendiente de probar el envio real por
+  Telegram desde dentro de GitHub Actions.
 
 **Nota sobre una vuelta atras:** la primera version de esto usaba una tarea
 programada de Cowork para que Claude escribiera el analisis. Se descarto:
@@ -105,13 +108,14 @@ secret**. Anade:
 Pestana **Actions** del repo → **Recoger metricas de Instagram (programado)**
 → **Run workflow**. Revisa el log como se explica arriba.
 
-## Analisis semanal por audio (Telegram)
+## Analisis semanal por audio e imagen (Telegram)
 
 Ademas de guardar los datos, cada semana se analizan de verdad (llamando a la
-API de Claude, no una plantilla de numeros fija) y el resultado te llega como
-audio a tu bot de Telegram de texto-a-voz (`tts-telegram-bot`). Todo el flujo
-vive en GitHub Actions — no depende de que tengas Cowork ni el ordenador
-encendidos:
+API de Claude, no una plantilla de numeros fija) y el resultado te llega en
+tres mensajes a tu bot de Telegram de texto-a-voz (`tts-telegram-bot`): el
+texto del analisis, el audio del mismo texto, y un grafico con la evolucion
+de seguidores y las publicaciones con mas alcance. Todo el flujo vive en
+GitHub Actions — no depende de que tengas Cowork ni el ordenador encendidos:
 
 1. **`fetch-metrics.yml`** (lunes 07:00 UTC) corre dos scripts seguidos, en el
    mismo run:
@@ -123,12 +127,23 @@ encendidos:
      como fallido en el log, pero los datos se guardan igual.
    - Al final se comitean juntos `account_metrics.csv`, `media_metrics.csv` y
      `weekly_analysis.txt`.
-2. **`speak-analysis.yml`** (lunes 10:00 UTC, tres horas de margen) — lee
-   `weekly_analysis.txt`, genera el audio con `edge-tts` (la misma libreria
-   que usa `tts-telegram-bot`) y lo manda por Telegram. Solo manda audio si el
-   texto cambio desde el ultimo envio (compara un hash guardado en
-   `.last_sent_analysis_hash`), asi que ejecutarlo dos veces seguidas no te
-   duplica el mensaje.
+2. **`speak-analysis.yml`** (lunes 10:00 UTC, tres horas de margen) corre dos
+   scripts, tambien seguidos:
+   - `send_weekly_audio.py` — lee `weekly_analysis.txt`, genera el audio con
+     `edge-tts` (la misma libreria que usa `tts-telegram-bot`) y manda texto +
+     audio por Telegram. Solo manda si el texto cambio desde el ultimo envio
+     (hash en `.last_sent_analysis_hash`), asi que ejecutarlo dos veces
+     seguidas no te duplica el mensaje.
+   - `send_weekly_chart.py` — con `matplotlib`, dibuja dos paneles a partir de
+     los mismos CSV (sin llamar a ninguna API): la evolucion de
+     `followers_count` dia a dia, y las publicaciones con mas alcance ahora
+     mismo (top 8), y manda la imagen por Telegram. Con pocas semanas de
+     historico el panel de seguidores se vera casi vacio — es normal, se
+     vuelve mas util cuanto mas tiempo lleve corriendo el bot. Mismo patron
+     anti-duplicados que el audio, con su propio hash en
+     `.last_sent_chart_hash` (los datos del grafico pueden cambiar en una
+     semana en la que el texto no cambie, o al reves). Si este paso falla no
+     bloquea el commit del marcador del audio (`continue-on-error`).
 
 Por que en dos workflows y no uno: son responsabilidades distintas (recoger
 datos + analizar vs. convertir a voz + avisar), y separarlos permite que uno
@@ -177,16 +192,18 @@ instagram-metrics-bot/
 ├── scripts/
 │   ├── fetch_metrics.py         # Pide insights y los anade a los CSV
 │   ├── analyze_metrics.py       # Le pasa los CSV a la API de Claude y escribe weekly_analysis.txt
-│   └── send_weekly_audio.py     # Convierte weekly_analysis.txt a audio y lo manda
+│   ├── send_weekly_audio.py     # Convierte weekly_analysis.txt a audio y manda texto + audio
+│   └── send_weekly_chart.py     # Dibuja seguidores y top posts a partir de los CSV y manda la imagen
 ├── .github/workflows/
 │   ├── fetch-metrics.yml        # Cron semanal: actualiza los CSV Y el analisis (mismo run)
-│   └── speak-analysis.yml       # Cron semanal: manda el audio si hay analisis nuevo
+│   └── speak-analysis.yml       # Cron semanal: manda audio + grafico si hay analisis nuevo
 ├── docs/
 │   └── esquema-bot.svg          # Diagrama del flujo completo (ver "Esquema" arriba)
 ├── account_metrics.csv          # Se crea solo en la primera ejecucion
 ├── media_metrics.csv            # Se crea solo en la primera ejecucion
 ├── weekly_analysis.txt          # Lo escribe analyze_metrics.py cada semana
-├── .last_sent_analysis_hash     # Lo escribe speak-analysis.yml, evita duplicados
+├── .last_sent_analysis_hash     # Lo escribe speak-analysis.yml, evita duplicar el audio
+├── .last_sent_chart_hash        # Lo escribe speak-analysis.yml, evita duplicar el grafico
 ├── requirements.txt
 ├── .env.example
 ├── .gitattributes
