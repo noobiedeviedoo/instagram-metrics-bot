@@ -2,10 +2,12 @@ name: Mandar analisis semanal por audio (Telegram)
 
 on:
   schedule:
-    # Lunes 10:00 UTC — dos horas despues del cron de fetch-metrics.yml
-    # (07:00 UTC), para dar tiempo a que la tarea programada de Cowork lea
-    # los CSV frescos y escriba weekly_analysis.txt antes de que esto corra.
-    - cron: "0 10 * * 1"
+    # Lunes 06:00 UTC = 08:00 hora de Miguel (UTC+2, verano). Tres horas
+    # despues del cron de fetch-metrics.yml (03:00 UTC), para dar tiempo a
+    # que ese workflow deje weekly_analysis.txt listo antes de que esto corra.
+    # Ojo: GitHub Actions programa siempre en UTC, no ajusta por DST — en
+    # invierno (UTC+1) el mensaje llegara a las 07:00 hora local en vez de 08:00.
+    - cron: "0 6 * * 1"
   workflow_dispatch: {}
 
 permissions:

@@ -2,9 +2,10 @@ name: Recoger metricas de Instagram (programado)
 
 on:
   schedule:
-    # Todos los lunes a las 07:00 UTC (08:00 en Espana en invierno, 09:00 en
-    # verano). Cambia el cron si prefieres otra frecuencia.
-    - cron: "0 7 * * 1"
+    # Todos los lunes a las 03:00 UTC (04:00 en Espana en invierno, 05:00 en
+    # verano). Adelantado para dejar margen antes de speak-analysis.yml
+    # (06:00 UTC), que manda el mensaje de Telegram a las 08:00 hora local.
+    - cron: "0 3 * * 1"
   workflow_dispatch: {}
 
 permissions:
