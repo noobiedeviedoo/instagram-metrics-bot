@@ -2,12 +2,15 @@
 
 ## Objetivo
 
-Cada semana, pide a la Graph API de Instagram las metricas de tu cuenta
+Cada dia, pide a la Graph API de Instagram las metricas de tu cuenta
 (alcance, visitas al perfil, interacciones...) y de tus publicaciones
 recientes (alcance, likes, comentarios, guardados...), y las guarda en dos
-CSV dentro de este mismo repo. Con ese historico, Claude (o cualquier otra
-herramienta) puede leer la evolucion en el tiempo y darte analisis y consejos
-sin tener que llamar a la API cada vez que preguntes.
+CSV dentro de este mismo repo — un snapshot diario, para poder ver el
+comportamiento dia a dia y no solo una foto semanal. Con ese historico,
+Claude (o cualquier otra herramienta) puede leer la evolucion en el tiempo y
+darte analisis y consejos sin tener que llamar a la API cada vez que
+preguntes. El reporte (analisis hablado + grafico) se sigue mandando una vez
+a la semana — ver "Analisis semanal por audio e imagen" mas abajo.
 
 Es un proyecto independiente del bot de publicacion (`automatizacion-instagram`)
 a proposito, aunque los dos hablan con la misma cuenta de Instagram — asi cada
@@ -23,19 +26,26 @@ uno no afecta al otro.
 **Entorno:** GitHub Actions (gratuito, sin mantenimiento, no depende de que
 tengas el ordenador encendido) — igual que el bot de publicacion.
 
-**Frecuencia:** cron semanal, lunes 07:00 UTC (`.github/workflows/fetch-metrics.yml`).
-Puedes cambiar el cron o lanzarlo a mano desde la pestana Actions de GitHub
-(`workflow_dispatch`).
+**Frecuencia:** cron diario, 03:00 UTC (`.github/workflows/fetch-metrics.yml`)
+para la recogida de metricas — antes era semanal, se cambio a diario para que
+los datos reflejen el comportamiento dia a dia de la cuenta. El reporte
+(analisis + audio + grafico) se sigue mandando una vez a la semana, lunes
+06:00 UTC (`.github/workflows/speak-analysis.yml`) — ver "Analisis semanal
+por audio e imagen" mas abajo. Puedes cambiar cualquiera de los dos crons o
+lanzarlos a mano desde la pestana Actions de GitHub (`workflow_dispatch`).
 
 **Datos guardados:**
 - `account_metrics.csv` — una fila por metrica de cuenta y ejecucion (alcance,
   visitas al perfil, cuentas alcanzadas, interacciones totales, clics a la
-  web, seguidores).
-- `media_metrics.csv` — una fila por metrica y publicacion de los ultimos 90
-  dias (alcance, reproducciones, likes, comentarios, veces compartida,
-  guardados, interacciones totales). Como se vuelve a pedir cada semana para
-  las mismas publicaciones, puedes ver como evoluciona un post con el tiempo,
-  no solo su valor final.
+  web, seguidores), un snapshot por dia.
+- `media_metrics.csv` — una fila por metrica y publicacion, de las
+  `MEDIA_RECENT_COUNT` publicaciones mas recientes (por defecto 5; antes eran
+  TODAS las de los ultimos 90 dias, pero eso corria una vez por semana — con
+  el fetch ahora a diario, mantener la ventana de 90 dias multiplicaria por
+  ~7 las filas guardadas y las llamadas a la API de Meta, asi que se paso a
+  un numero fijo de publicaciones por ejecucion). Como se vuelve a pedir cada
+  dia para las mismas publicaciones recientes, puedes ver como evoluciona un
+  post con el tiempo, no solo su valor final.
 
 Ambos CSV son de solo-anadir (append-only), igual que `published_log.csv` del
 otro bot, y tienen `merge=union` en `.gitattributes` para que nunca haya
@@ -117,43 +127,47 @@ texto del analisis, el audio del mismo texto, y un grafico con la evolucion
 de seguidores y las publicaciones con mas alcance. Todo el flujo vive en
 GitHub Actions — no depende de que tengas Cowork ni el ordenador encendidos:
 
-1. **`fetch-metrics.yml`** (lunes 07:00 UTC) corre dos scripts seguidos, en el
-   mismo run:
-   - `fetch_metrics.py` — actualiza `account_metrics.csv` y `media_metrics.csv`,
-     como antes.
-   - `analyze_metrics.py` — le pasa esos CSV a la API de Claude (Messages API)
-     y guarda la respuesta en `weekly_analysis.txt`. Si este paso falla (p.ej.
-     la API de Anthropic caida), no bloquea el commit de los CSV — se marca
-     como fallido en el log, pero los datos se guardan igual.
-   - Al final se comitean juntos `account_metrics.csv`, `media_metrics.csv` y
-     `weekly_analysis.txt`.
-2. **`speak-analysis.yml`** (lunes 10:00 UTC, tres horas de margen) corre dos
-   scripts, tambien seguidos:
+1. **`fetch-metrics.yml`** (diario, 03:00 UTC) corre un solo script:
+   - `fetch_metrics.py` — actualiza `account_metrics.csv` (un snapshot mas de
+     cuenta) y `media_metrics.csv` (insights de las publicaciones mas
+     recientes), y comitea los dos CSV. Ya NO llama a la API de Claude en
+     este paso — eso se movio a `speak-analysis.yml` (ver mas abajo), para
+     que el analisis se genere una vez por semana y no se gaste una llamada a
+     la API cada dia.
+2. **`speak-analysis.yml`** (lunes 06:00 UTC, tres horas de margen sobre el
+   fetch de ese mismo dia) corre tres scripts seguidos:
+   - `analyze_metrics.py` — le pasa los CSV (que ya traen hasta 28 dias de
+     snapshots diarios) a la API de Claude (Messages API) y guarda la
+     respuesta en `weekly_analysis.txt`. Si este paso falla (p.ej. la API de
+     Anthropic caida), no bloquea los pasos siguientes — se marca como
+     fallido en el log, y como el texto no cambio, el audio de ese dia
+     simplemente no se manda (ver hash mas abajo).
    - `send_weekly_audio.py` — lee `weekly_analysis.txt`, genera el audio con
      `edge-tts` (la misma libreria que usa `tts-telegram-bot`) y manda texto +
      audio por Telegram. Solo manda si el texto cambio desde el ultimo envio
      (hash en `.last_sent_analysis_hash`), asi que ejecutarlo dos veces
      seguidas no te duplica el mensaje.
    - `send_weekly_chart.py` — con `matplotlib`, dibuja dos paneles a partir de
-     los mismos CSV (sin llamar a ninguna API). El primero es la "Tendencia
-     semanal": un punto por dia con 4 lineas — tasa de interaccion (%, eje
-     izquierdo, valor real) y seguidores / alcance / reproducciones-por-
-     alcance (eje derecho, INDEXADAS a 100 sobre el primer dato, porque son
-     cifras en escalas muy distintas entre si y lo que importa es cuanto
-     sube o baja cada una, no su valor absoluto). El segundo panel es igual
-     que antes: las publicaciones con mas alcance ahora mismo (top 8). Con
-     pocas semanas de historico el panel de tendencia se vera casi vacio (un
-     solo punto por linea, las 3 indexadas superpuestas en 100) — es normal,
-     se vuelve mas util cuanto mas tiempo lleve corriendo el bot. Mismo
-     patron anti-duplicados que el audio, con su propio hash en
+     los CSV (sin llamar a ninguna API, y sin pasar por `analyze_metrics.py`).
+     El primero es la "Tendencia semanal": un punto por dia con 4 lineas —
+     tasa de interaccion (%, eje izquierdo, valor real) y seguidores /
+     alcance / reproducciones-por-alcance (eje derecho, INDEXADAS a 100 sobre
+     el primer dato, porque son cifras en escalas muy distintas entre si y lo
+     que importa es cuanto sube o baja cada una, no su valor absoluto). El
+     segundo panel: las publicaciones con mas alcance ahora mismo (top 8).
+     Con el fetch ahora a diario, este panel gana un punto nuevo cada dia en
+     vez de uno por semana, asi que se vuelve util mucho antes. Mismo patron
+     anti-duplicados que el audio, con su propio hash en
      `.last_sent_chart_hash` (los datos del grafico pueden cambiar en una
      semana en la que el texto no cambie, o al reves). Si este paso falla no
-     bloquea el commit del marcador del audio (`continue-on-error`).
+     bloquea el commit de los marcadores (`continue-on-error`).
+   - Al final se comitean juntos `weekly_analysis.txt` (si cambio) y los
+     hashes `.last_sent_analysis_hash` / `.last_sent_chart_hash`.
 
 Por que en dos workflows y no uno: son responsabilidades distintas (recoger
-datos + analizar vs. convertir a voz + avisar), y separarlos permite que uno
-falle sin tumbar al otro, ademas de dejar margen de tiempo entre los dos sin
-complicar el cron.
+datos a diario vs. analizar + convertir a voz + avisar una vez por semana), y
+separarlos permite que uno falle sin tumbar al otro, ademas de que el fetch
+diario no dependa de la API de Claude ni de Telegram para nada.
 
 ### Secrets nuevos para este paso
 
@@ -200,8 +214,8 @@ instagram-metrics-bot/
 │   ├── send_weekly_audio.py     # Convierte weekly_analysis.txt a audio y manda texto + audio
 │   └── send_weekly_chart.py     # Dibuja seguidores y top posts a partir de los CSV y manda la imagen
 ├── .github/workflows/
-│   ├── fetch-metrics.yml        # Cron semanal: actualiza los CSV Y el analisis (mismo run)
-│   └── speak-analysis.yml       # Cron semanal: manda audio + grafico si hay analisis nuevo
+│   ├── fetch-metrics.yml        # Cron diario: solo actualiza los CSV (snapshot del dia)
+│   └── speak-analysis.yml       # Cron semanal: genera el analisis y manda audio + grafico
 ├── docs/
 │   └── esquema-bot.svg          # Diagrama del flujo completo (ver "Esquema" arriba)
 ├── account_metrics.csv          # Se crea solo en la primera ejecucion

@@ -2,13 +2,14 @@
 """
 Bot de metricas de Instagram.
 
-Pensado para ejecutarse periodicamente desde GitHub Actions (cron semanal).
-Cada ejecucion:
+Pensado para ejecutarse periodicamente desde GitHub Actions (cron diario,
+ver fetch-metrics.yml). Cada ejecucion:
   1. Pide insights de cuenta (alcance, visitas al perfil, interacciones...)
-     del dia y anade una fila por metrica a account_metrics.csv.
-  2. Lista las publicaciones de los ultimos MEDIA_LOOKBACK_DAYS dias y, para
-     cada una, pide sus insights (alcance, interacciones, likes, comentarios,
-     guardados...) y anade una fila por metrica a media_metrics.csv.
+     del dia y anade una fila por metrica a account_metrics.csv — un snapshot
+     por dia, para poder ver el comportamiento dia a dia y no solo semanal.
+  2. Pide insights de las MEDIA_RECENT_COUNT publicaciones mas recientes
+     (alcance, interacciones, likes, comentarios, guardados...) y anade una
+     fila por metrica a media_metrics.csv.
 
 Ambos CSV son append-only (mismo patron que published_log.csv del bot de
 publicacion): cada ejecucion solo anade filas nuevas, nunca reescribe ni
@@ -21,8 +22,16 @@ Variables de entorno requeridas (configuradas como GitHub Actions Secrets):
     IG_BUSINESS_ACCOUNT_ID  - ID de la cuenta profesional de Instagram
 
 Variables de entorno opcionales:
-    MEDIA_LOOKBACK_DAYS     - cuantos dias hacia atras revisar publicaciones
-                              (por defecto 90)
+    MEDIA_RECENT_COUNT      - cuantas publicaciones recientes revisar en cada
+                              ejecucion (por defecto 5). Antes esto se hacia
+                              con un MEDIA_LOOKBACK_DAYS (90 dias hacia atras,
+                              es decir TODAS las publicaciones recientes) en
+                              cada ejecucion semanal; con el fetch ahora a
+                              diario, repetir eso cada dia multiplicaria por
+                              ~7 las filas de media_metrics.csv y las llamadas
+                              a la API de Meta, asi que se cambio a un numero
+                              fijo de publicaciones (las mas nuevas) por
+                              ejecucion en vez de una ventana de dias.
 
 El token necesita, ademas de los permisos que ya tenga para publicar, estos
 dos: instagram_business_basic e instagram_business_manage_insights — ver
@@ -41,7 +50,7 @@ mano una vez mas y revisar el log.
 import csv
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -173,36 +182,21 @@ def fetch_account_fields(account_id: str, access_token: str) -> list[list]:
     return rows
 
 
-def fetch_recent_media(account_id: str, access_token: str, since: datetime) -> list[dict]:
-    """Lista publicaciones desde `since`, siguiendo paginacion. Devuelve
-    id, caption y fecha de cada una."""
-    media = []
-    url = f"{GRAPH_API_BASE}/{account_id}/media"
+def fetch_recent_media(account_id: str, access_token: str, count: int) -> list[dict]:
+    """Devuelve las `count` publicaciones mas recientes (id, caption y
+    fecha). El endpoint /media ya las devuelve ordenadas de la mas nueva a
+    la mas antigua, asi que basta con pedir `limit=count` en una sola
+    llamada — no hace falta paginar ni filtrar por fecha (a diferencia de
+    la version anterior, que bajaba TODAS las publicaciones de los ultimos
+    90 dias)."""
     params = {
         "fields": "id,caption,timestamp",
         "access_token": access_token,
-        "limit": 50,
+        "limit": count,
     }
-    while url:
-        resp = requests.get(url, params=params, timeout=30)
-        _raise_with_body(resp)
-        payload = resp.json()
-        stop = False
-        for item in payload.get("data", []):
-            ts = item.get("timestamp", "")
-            try:
-                posted_at = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            except ValueError:
-                posted_at = None
-            if posted_at and posted_at < since:
-                stop = True
-                continue
-            media.append(item)
-        next_url = payload.get("paging", {}).get("next")
-        if stop or not next_url:
-            break
-        url, params = next_url, None  # la URL "next" ya trae todos los parametros
-    return media
+    resp = requests.get(f"{GRAPH_API_BASE}/{account_id}/media", params=params, timeout=30)
+    _raise_with_body(resp)
+    return resp.json().get("data", [])[:count]
 
 
 def fetch_media_insights(media_id: str, access_token: str) -> dict:
@@ -232,7 +226,7 @@ def main():
     if not access_token or not account_id:
         sys.exit("Error: faltan IG_ACCESS_TOKEN o IG_BUSINESS_ACCOUNT_ID en el entorno.")
 
-    lookback_days = int(os.environ.get("MEDIA_LOOKBACK_DAYS", "90"))
+    recent_count = int(os.environ.get("MEDIA_RECENT_COUNT", "5"))
 
     print("Pidiendo metricas de cuenta...")
     account_rows = fetch_account_insights(account_id, access_token)
@@ -241,10 +235,9 @@ def main():
     append_csv_rows(ACCOUNT_CSV, ACCOUNT_CSV_HEADER, account_rows)
     print(f"  {len(account_rows)} filas anadidas a {ACCOUNT_CSV.name}")
 
-    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    print(f"Listando publicaciones desde {since.date()}...")
+    print(f"Listando las {recent_count} publicaciones mas recientes...")
     try:
-        media_items = fetch_recent_media(account_id, access_token, since)
+        media_items = fetch_recent_media(account_id, access_token, recent_count)
     except requests.RequestException as exc:
         sys.exit(f"Error listando publicaciones: {exc}")
     print(f"  {len(media_items)} publicaciones encontradas")

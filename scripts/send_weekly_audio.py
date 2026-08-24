@@ -2,11 +2,11 @@
 """
 Bot de audio semanal - convierte a voz el analisis y lo manda por Telegram.
 
-Pensado para ejecutarse desde GitHub Actions, en un cron posterior al de
-fetch-metrics.yml (necesita que el analisis ya este escrito en el repo antes
-de correr). El analisis en si NO lo escribe este script: lo escribe
-analyze_metrics.py, dentro del mismo run de fetch-metrics.yml, en el archivo
-`weekly_analysis.txt` de la raiz del repo (mismo patron que
+Pensado para ejecutarse desde GitHub Actions, en speak-analysis.yml, justo
+despues de analyze_metrics.py (necesita que el analisis ya este escrito en
+el repo antes de correr). El analisis en si NO lo escribe este script: lo
+escribe analyze_metrics.py, dentro del mismo run de speak-analysis.yml, en
+el archivo `weekly_analysis.txt` de la raiz del repo (mismo patron que
 account_metrics.csv/media_metrics.csv: este script solo lee lo que ya esta
 en el repo, no llama a ninguna IA).
 

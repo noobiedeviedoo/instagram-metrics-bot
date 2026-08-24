@@ -4,9 +4,11 @@ Analiza los CSV de metricas y escribe el resultado en weekly_analysis.txt,
 usando la API de Claude directamente (Messages API) — sin pasar por Cowork,
 para que todo el flujo semanal dependa solo de GitHub Actions.
 
-Pensado para correr como paso extra dentro de fetch-metrics.yml, justo
-despues de fetch_metrics.py y antes del commit final, para que
-weekly_analysis.txt quede en el mismo commit que los CSV que acaba de leer.
+Pensado para correr como paso dentro de speak-analysis.yml, justo antes de
+send_weekly_audio.py, una vez por semana — lee los CSV que fetch-metrics.yml
+ha ido dejando con snapshots diarios durante toda la semana (ese workflow
+corre a diario, pero ya no llama a la API de Claude: eso se hace aqui, una
+vez, en el momento de generar el reporte semanal, no cada dia).
 
 Variables de entorno requeridas:
     ANTHROPIC_API_KEY   - API key de Anthropic (console.anthropic.com)
@@ -30,17 +32,21 @@ ANALYSIS_PATH = REPO_ROOT / "weekly_analysis.txt"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # Cuantas fotos/snapshots como maximo se le mandan a Claude — de sobra para
-# el uso real (21 posts, unas pocas semanas de snapshots de cuenta), y evita
-# que el prompt crezca sin limite a medida que los CSV se acumulan semana a
-# semana (son append-only, solo crecen).
-MAX_ACCOUNT_SNAPSHOTS = 12
+# el uso real, y evita que el prompt crezca sin limite a medida que los CSV
+# se acumulan (son append-only, solo crecen). fetch_metrics.py ahora corre a
+# diario (antes semanal), asi que 28 snapshots cubren unas 4 semanas de datos
+# dia a dia en vez de solo 12 semanas de fotos sueltas — necesario para que
+# el analisis pueda comparar el comportamiento entre dias, no solo semana
+# contra semana.
+MAX_ACCOUNT_SNAPSHOTS = 28
 MAX_MEDIA_POSTS = 40
 
 PROMPT_TEMPLATE = """Eres un analista que le prepara a Miguel Ángel un resumen semanal hablado \
 sobre el rendimiento de su cuenta de Instagram. Te paso dos resumenes ya procesados (no CSV en \
-bruto): uno con los ultimos snapshots de metricas de cuenta, ordenados del mas antiguo al mas \
-reciente, y otro con el ESTADO ACTUAL de cada publicacion (el dato mas reciente de cada una, no \
-el historial completo), ordenado de la publicacion mas reciente a la mas antigua.
+bruto): uno con los ultimos snapshots DIARIOS de metricas de cuenta (uno por dia, no por semana), \
+ordenados del mas antiguo al mas reciente, y otro con el ESTADO ACTUAL de cada publicacion (el \
+dato mas reciente de cada una, no el historial completo), ordenado de la publicacion mas reciente \
+a la mas antigua.
 
 Tu tarea: escribir un analisis en espanol, de 150 a 250 palabras, en PROSA CONTINUA — nada de \
 markdown, viñetas, tablas, emojis ni encabezados, porque este texto lo va a leer en voz alta un \
@@ -49,16 +55,18 @@ empieza con una frase resumen y luego desarrolla 3 o 5 puntos concretos y utiles
 
 Cosas que deberias mirar si los datos lo permiten (usa el 'followers_count' del ultimo snapshot \
 de cuenta como referencia de audiencia):
-- Como esta el alcance/interacciones del ultimo snapshot de cuenta frente al anterior (subiendo, \
-bajando, estable) — solo si hay mas de un snapshot con fecha realmente distinta (dias distintos, \
-no solo horas distintas del mismo dia).
+- Como ha ido el alcance/interacciones dia a dia en la ultima semana (subiendo, bajando, estable, \
+con picos o dias flojos sueltos) — no te limites a comparar solo el ultimo snapshot contra el \
+anterior, mira la serie de los ultimos 7-10 dias si hay datos suficientes.
+- Si hay algun patron por dia de la semana (p.ej. findes mas flojos o mas fuertes que entre \
+semana), dilo solo si se ve con varias semanas de datos, no a partir de uno o dos dias sueltos.
 - Que publicacion de la lista (que ya esta ordenada de mas reciente a mas antigua) tiene mas \
 alcance y cual menos, expresado como porcentaje de los seguidores actuales.
 - Cualquier patron que destaque: formato que retiene mas reproducciones (views mucho mayor que \
 reach), cadencia de publicacion muy irregular mirando las fechas, una racha de posts flojos, etc.
-- Si el snapshot de cuenta mas reciente tiene valores identicos al anterior, o si la publicacion \
-mas reciente de la lista lleva ya muchos dias, dilo explicitamente en vez de asumir que es una \
-foto nueva o una bajada real.
+- Si varios snapshots diarios seguidos tienen valores identicos, o si la publicacion mas reciente \
+de la lista lleva ya muchos dias, dilo explicitamente en vez de asumir que es una foto nueva o una \
+bajada real.
 
 --- snapshots de account_metrics.csv (mas antiguo primero) ---
 {account_summary}
