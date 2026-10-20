@@ -1,0 +1,31 @@
+name: Probar API (temporal)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probar metricas candidatas
+        env:
+          T: ${{ secrets.IG_ACCESS_TOKEN }}
+          A: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, urllib.parse, urllib.request
+          T, A = os.environ["T"], os.environ["A"]
+          def get(path, **p):
+              p["access_token"] = T
+              url = f"https://graph.instagram.com/{path}?" + urllib.parse.urlencode(p)
+              try:
+                  return json.load(urllib.request.urlopen(url))
+              except urllib.error.HTTPError as e:
+                  return json.load(e)
+          for m in ["profile_links_taps", "follows_and_unfollows", "website_clicks", "profile_views"]:
+              print(m, "→", json.dumps(get(f"{A}/insights", metric=m, period="day", metric_type="total_value"))[:400])
+          print("follows_and_unfollows por tipo →", json.dumps(get(f"{A}/insights", metric="follows_and_unfollows", period="day", metric_type="total_value", breakdown="follow_type"))[:600])
+          print("profile_links_taps por tipo →", json.dumps(get(f"{A}/insights", metric="profile_links_taps", period="day", metric_type="total_value", breakdown="contact_button_type"))[:600])
+          print("follower_count serie →", json.dumps(get(f"{A}/insights", metric="follower_count", period="day"))[:400])
+          print("media →", json.dumps(get(f"{A}/media", fields="id,media_type,media_product_type,timestamp", limit=4))[:700])
+          EOF
