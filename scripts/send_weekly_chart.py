@@ -93,6 +93,12 @@ METRICAS_NEGOCIO = [
 ]
 SUBIR_ES_MALO = {"unfollows"}
 
+# Visitas a sastrephoto.com que llegan desde Instagram, segun el bot de
+# metricas de la web (repo publico, se lee sin token). Vercel guarda de que
+# dominio llega cada visita: Instagram aparece como l.instagram.com o instagram.com.
+WEB_BREAKDOWN_URL = "https://raw.githubusercontent.com/noobiedeviedoo/web-metrics-vercel/main/daily_breakdown.csv"
+DOMINIOS_INSTAGRAM = {"l.instagram.com", "instagram.com", "www.instagram.com"}
+
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 
@@ -144,7 +150,8 @@ def resumen_cuenta(path: Path) -> dict | None:
     semana_desde = fin - timedelta(days=6)
     anterior_desde = fin - timedelta(days=13)
 
-    resumen = {"fin": fin, "inicio": inicio, "semana_desde": semana_desde, "metricas": {}}
+    resumen = {"fin": fin, "inicio": inicio, "semana_desde": semana_desde, "metricas": {},
+               "web_desde_ig": visitas_web_desde_instagram(semana_desde, fin)}
     for metrica, titulo, agregado in todas:
         datos = {date.fromisoformat(d): v for d, v in series[metrica].items()}
         en_rango = sorted((d, v) for d, v in datos.items() if d >= inicio)
@@ -172,6 +179,31 @@ def formatos_por_post() -> dict[str, str]:
         return {}
     with MEDIA_INFO_CSV.open(newline="", encoding="utf-8") as f:
         return {row["media_id"]: row["formato"] for row in csv.DictReader(f)}
+
+
+def visitas_web_desde_instagram(semana_desde: date, fin: date) -> dict | None:
+    """Visitantes de la web que llegan desde Instagram esta semana y la anterior.
+    None si no se puede leer el CSV del bot de la web (no debe tumbar el informe)."""
+    try:
+        resp = requests.get(WEB_BREAKDOWN_URL, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"Aviso: no se pudieron leer las metricas de la web: {exc}")
+        return None
+    por_dia: dict[date, int] = {}
+    for row in csv.DictReader(resp.text.splitlines()):
+        if row.get("dimension") == "referrerHostname" and row.get("value") in DOMINIOS_INSTAGRAM:
+            try:
+                dia = date.fromisoformat(row["date_utc"])
+                por_dia[dia] = por_dia.get(dia, 0) + int(row["visitors"])
+            except (KeyError, ValueError):
+                continue
+    anterior_desde = semana_desde - timedelta(days=7)
+    return {
+        "titulo": "Visitas web desde IG", "agregado": "suma", "serie": [], "antes_fecha": None,
+        "actual": sum(v for d, v in por_dia.items() if semana_desde <= d <= fin),
+        "antes": sum(v for d, v in por_dia.items() if anterior_desde <= d < semana_desde),
+    }
 
 
 def posts_recientes(path: Path) -> tuple[list[dict], float | None]:
@@ -277,6 +309,20 @@ def dibujar_cifra(ax, m: dict):
     ax.text(0, 0.08, texto, fontsize=9, color=color, transform=ax.transAxes, va="bottom")
 
 
+def dibujar_seguidores_netos(ax, ganados: dict, perdidos: dict):
+    """Una sola cifra para seguidores ganados y perdidos (+16 / −6) y el neto."""
+    ax.axis("off")
+    ax.text(0, 0.92, "Ganados / perdidos", fontsize=10, color=COLOR_TEXTO_2, transform=ax.transAxes, va="top")
+    if ganados["actual"] is None or perdidos["actual"] is None:
+        ax.text(0, 0.62, "—", fontsize=22, fontweight="bold", color=COLOR_TEXTO, transform=ax.transAxes, va="top")
+        return
+    ax.text(0, 0.62, f"+{ganados['actual']} / −{perdidos['actual']}", fontsize=22, fontweight="bold",
+            color=COLOR_TEXTO, transform=ax.transAxes, va="top")
+    neto = ganados["actual"] - perdidos["actual"]
+    color = COLOR_SUBE if neto > 0 else COLOR_BAJA if neto < 0 else COLOR_APAGADO
+    ax.text(0, 0.08, f"neto {neto:+d} esta semana", fontsize=9, color=color, transform=ax.transAxes, va="bottom")
+
+
 def dibujar_minigrafico(ax, m: dict, resumen: dict):
     ax.set_facecolor(COLOR_FONDO)
     ax.set_title(m["titulo"], loc="left", fontsize=11, fontweight="bold", color=COLOR_TEXTO, pad=6)
@@ -371,9 +417,18 @@ def generar_grafico(resumen: dict, posts: list[dict], mediana: float | None, des
     metricas = [resumen["metricas"][m] for m, _t, _a in METRICAS]
     for i, m in enumerate(metricas):
         dibujar_cifra(fig.add_subplot(gs[0, i]), m)
-    for i, (clave, _t, _a) in enumerate(METRICAS_NEGOCIO):
+    m = resumen["metricas"]
+    web = resumen["web_desde_ig"] or {"titulo": "Visitas web desde IG", "agregado": "suma",
+                                      "actual": None, "antes": None}
+    fila_negocio = [
+        lambda ax: dibujar_cifra(ax, m["profile_views"]),
+        lambda ax: dibujar_cifra(ax, m["website_clicks"]),
+        lambda ax: dibujar_cifra(ax, web),
+        lambda ax: dibujar_seguidores_netos(ax, m["follows"], m["unfollows"]),
+    ]
+    for i, dibujar in enumerate(fila_negocio):
         ax = fig.add_subplot(gs[1, i])
-        dibujar_cifra(ax, resumen["metricas"][clave])
+        dibujar(ax)
         if i == 0:
             ax.text(0, 1.25, "DEL PERFIL A TU NEGOCIO", transform=ax.transAxes, fontsize=9,
                     fontweight="bold", color=COLOR_APAGADO)

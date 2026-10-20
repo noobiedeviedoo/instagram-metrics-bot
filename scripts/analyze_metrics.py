@@ -105,6 +105,11 @@ def cifras_de_la_semana() -> str:
             continue
         antes = f" (semana anterior: {datos['antes']})" if datos["antes"] is not None else ""
         lineas.append(f"- {datos['titulo']}: {datos['actual']}{antes}.")
+    web = resumen["web_desde_ig"]
+    if web is not None:
+        lineas.append(f"- Visitas a la web que llegan desde Instagram, según las analíticas de la web: {web['actual']} "
+                      f"(semana anterior: {web['antes']}). Suele ser menos que los clics: el navegador de Instagram "
+                      "y los bloqueadores no siempre dejan registrar la visita.")
     visitas, clics = m["profile_views"]["actual"], m["website_clicks"]["actual"]
     if visitas and clics is not None:
         lineas.append(f"- De cada 100 visitas al perfil, {clics / visitas * 100:.1f} pulsan el enlace de la web.")
