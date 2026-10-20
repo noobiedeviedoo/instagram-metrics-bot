@@ -206,12 +206,12 @@ def main():
         },
         json={
             "model": model,
-            # claude-sonnet-5 puede usar parte del presupuesto en un bloque
-            # de "thinking" antes de escribir la respuesta final — con poco
-            # margen (probado con 700) se queda sin tokens para el texto y
-            # la respuesta llega vacia. Con 4096 sobra para el pensamiento y
-            # para las 150-250 palabras del analisis.
-            "max_tokens": 4096,
+            # claude-sonnet-5 piensa antes de escribir y ese pensamiento cuenta
+            # contra max_tokens: con 4096 (2026-10-21) se lo gasto entero
+            # pensando y la respuesta llego sin texto. 16000 deja margen de
+            # sobra, y effort "medium" basta para un resumen de 150 palabras.
+            "max_tokens": 16000,
+            "output_config": {"effort": "medium"},
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=90,
@@ -223,7 +223,8 @@ def main():
     data = resp.json()
     texto = "".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text").strip()
     if not texto:
-        sys.exit(f"Error: la respuesta de la API no traia texto: {data}")
+        sys.exit(f"Error: la respuesta no traia texto (stop_reason={data.get('stop_reason')}, "
+                 f"uso={data.get('usage')}).")
 
     ANALYSIS_PATH.write_text(texto + "\n", encoding="utf-8")
     print(f"Analisis escrito en {ANALYSIS_PATH.name} ({len(texto.split())} palabras aprox.)")
