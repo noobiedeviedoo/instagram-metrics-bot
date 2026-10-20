@@ -51,23 +51,48 @@ Ambos CSV son de solo-anadir (append-only), igual que `published_log.csv` del
 otro bot, y tienen `merge=union` en `.gitattributes` para que nunca haya
 conflictos de git si se ejecuta mas de una vez seguida.
 
-## Estado
+## Estado (2026-10-21)
 
-- `fetch_metrics.py` — validado contra la API real desde el 2026-08-04 (21
-  publicaciones, metricas de cuenta y de posts llegando bien, incluidos
-  seguidores reales via `fetch_account_fields()` — la metrica de insights
-  `follower_count` no daba datos ni con `metric_type=total_value`, asi que
-  seguidores/num. de publicaciones se piden directo al perfil en vez de a
-  `/insights`).
-- `send_weekly_audio.py` / `speak-analysis.yml` — probado de punta a punta el
-  2026-08-04 con un analisis escrito a mano: genero el audio y llego bien por
-  Telegram.
-- `analyze_metrics.py` — probado con la API simulada (mocks), pendiente de
-  probar contra la API real de Anthropic — falta que se ejecute una vez en
-  GitHub Actions con `ANTHROPIC_API_KEY` configurada (ver mas abajo).
-- `send_weekly_chart.py` — probado en local generando el PNG contra los CSV
-  reales (347 seguidores, 21 posts), pendiente de probar el envio real por
-  Telegram desde dentro de GitHub Actions.
+Todo funcionando de punta a punta en GitHub Actions: recogida diaria, analisis
+con la API de Claude, audio y grafico por Telegram.
+
+- **Token de Instagram:** caduco el 2026-10-01 y la recogida fallo 20 dias sin
+  avisar. Desde el 2026-10-21 `renew-token.yml` lo renueva cada domingo (cada
+  renovacion dura 60 dias) y lo guarda en este repo y en
+  `automatizacion-instagram`, usando el secret `GH_PAT` (token personal de
+  GitHub con permiso de escribir Secrets en esos dos repos; **tambien caduca**).
+  Si caduca igualmente: nuevo token en developers.facebook.com → app → Casos
+  de uso → "Administrar mensajes y contenido en Instagram" → "Configuracion de
+  la API con inicio de sesion de empresas de Instagram" → "2. Genera
+  identificadores de acceso" → "Generar identificador". Guardarlo SIN pegarlo
+  en el prompt de `gh` (kitty lo corrompe): copiarlo y
+  `wl-paste -n | gh secret set IG_ACCESS_TOKEN -R noobiedeviedoo/<repo>`.
+- **Avisos:** `fetch-metrics.yml` y `renew-token.yml` mandan un Telegram si fallan.
+- **Metricas de cuenta:** alcance, visualizaciones, reposts, cuentas que
+  interactuan, interacciones, visitas al perfil (`profile_views`), clics al
+  enlace de la web (`website_clicks`) y seguidores ganados/perdidos
+  (`follows`/`unfollows`, de `follows_and_unfollows` con `breakdown=follow_type`).
+  Pese a lo que decia una version anterior, `profile_views` y `website_clicks`
+  SI funcionan con este acceso (probado en vivo).
+- **Formato de cada publicacion:** `media_info.csv` (reel, carrusel, foto,
+  video), se reescribe entero en cada recogida.
+- **Huecos:** `backfill.yml` (manual, primero en modo prueba) rellena dias sin
+  datos o metricas nuevas hacia atras; Instagram guarda unos 30 dias. Se uso
+  para el 2026-10-02 → 10-19. Seguidores y n.º de publicaciones no se pueden
+  recuperar hacia atras.
+- **Grafico semanal** (`send_weekly_chart.py`): cifras de la semana con su
+  cambio, fila "del perfil a tu negocio" (incluye las visitas a la web que
+  llegan desde Instagram, leidas del repo publico `web-metrics-vercel`), un
+  minigrafico por metrica de las ultimas 4 semanas y los posts de los ultimos
+  14 dias frente a la mediana. Probar en local sin mandar nada:
+  `SOLO_IMAGEN=/tmp/g.png python scripts/send_weekly_chart.py`.
+- **Analisis** (`analyze_metrics.py`): Python calcula las comparaciones y
+  Claude recibe solo esas cifras y el informe anterior; estructura fija
+  (titular, que ha cambiado, una recomendacion) y muletillas prohibidas. Ver
+  el prompt sin llamar a la API: `ANTHROPIC_API_KEY=x SOLO_PROMPT=1 python
+  scripts/analyze_metrics.py`.
+- Los repos de metricas son **publicos a proposito**: Actions es gratis sin
+  limite en repos publicos.
 
 **Nota sobre una vuelta atras:** la primera version de esto usaba una tarea
 programada de Cowork para que Claude escribiera el analisis. Se descarto:
@@ -209,17 +234,21 @@ lo automatico.
 ```
 instagram-metrics-bot/
 ├── scripts/
-│   ├── fetch_metrics.py         # Pide insights y los anade a los CSV
-│   ├── analyze_metrics.py       # Le pasa los CSV a la API de Claude y escribe weekly_analysis.txt
+│   ├── fetch_metrics.py         # Pide insights y los anade a los CSV; reescribe media_info.csv
+│   ├── backfill_account.py      # Rellena huecos de account_metrics.csv (lo lanza backfill.yml)
+│   ├── analyze_metrics.py       # Calcula las cifras de la semana, se las pasa a Claude y escribe weekly_analysis.txt
 │   ├── send_weekly_audio.py     # Convierte weekly_analysis.txt a audio y manda texto + audio
-│   └── send_weekly_chart.py     # Dibuja seguidores y top posts a partir de los CSV y manda la imagen
+│   └── send_weekly_chart.py     # Dibuja el resumen semanal a partir de los CSV y manda la imagen
 ├── .github/workflows/
-│   ├── fetch-metrics.yml        # Cron diario: solo actualiza los CSV (snapshot del dia)
-│   └── speak-analysis.yml       # Cron semanal: genera el analisis y manda audio + grafico
+│   ├── fetch-metrics.yml        # Cron diario: solo actualiza los CSV (avisa por Telegram si falla)
+│   ├── speak-analysis.yml       # Cron semanal (lunes): genera el analisis y manda audio + grafico
+│   ├── renew-token.yml          # Cron semanal (domingo): renueva el token de Instagram en los dos bots
+│   └── backfill.yml             # Manual: rellenar huecos de metricas de cuenta
 ├── docs/
 │   └── esquema-bot.svg          # Diagrama del flujo completo (ver "Esquema" arriba)
 ├── account_metrics.csv          # Se crea solo en la primera ejecucion
 ├── media_metrics.csv            # Se crea solo en la primera ejecucion
+├── media_info.csv               # Catalogo de publicaciones con su formato
 ├── weekly_analysis.txt          # Lo escribe analyze_metrics.py cada semana
 ├── .last_sent_analysis_hash     # Lo escribe speak-analysis.yml, evita duplicar el audio
 ├── .last_sent_chart_hash        # Lo escribe speak-analysis.yml, evita duplicar el grafico
