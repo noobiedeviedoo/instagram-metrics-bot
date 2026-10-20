@@ -1,0 +1,57 @@
+name: Rellenar hueco de metricas de cuenta (manual)
+
+# Para cuando la recogida diaria no ha corrido unos dias (p. ej. token caducado).
+# Ver scripts/backfill_account.py. Lanzar primero con "prueba" marcado.
+
+on:
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: "Primer dia a rellenar (AAAA-MM-DD)"
+        required: true
+      hasta:
+        description: "Ultimo dia a rellenar (AAAA-MM-DD)"
+        required: true
+      prueba:
+        description: "Solo mostrar los valores, sin escribir"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Rellenar hueco
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_BUSINESS_ACCOUNT_ID: ${{ secrets.IG_BUSINESS_ACCOUNT_ID }}
+          DESDE: ${{ inputs.desde }}
+          HASTA: ${{ inputs.hasta }}
+          PRUEBA: ${{ inputs.prueba }}
+        run: python scripts/backfill_account.py
+
+      - name: Commit y push
+        if: ${{ !inputs.prueba }}
+        run: |
+          git config user.name "instagram-metrics-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add account_metrics.csv
+          if ! git diff --cached --quiet; then
+            git commit -m "Metricas: relleno del hueco ${{ inputs.desde }} a ${{ inputs.hasta }}"
+            git pull --no-edit --rebase
+            git push
+          fi
