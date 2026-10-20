@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bot de grafico semanal - genera una imagen con la tendencia semanal de la
-cuenta y las publicaciones con mas alcance, y la manda por Telegram.
+Bot de grafico semanal - genera una imagen con el resumen de la semana de la
+cuenta y la manda por Telegram.
 
 Pensado para ejecutarse desde GitHub Actions, en speak-analysis.yml, despues
 de send_weekly_audio.py (mismo cron, mismo chat de Telegram). No llama a
@@ -9,28 +9,17 @@ ninguna API de pago: toda la imagen sale de los CSV que ya estan en el repo
 (account_metrics.csv, media_metrics.csv), igual que analyze_metrics.py solo
 lee lo que ya escribio fetch_metrics.py.
 
-Dos paneles en una sola imagen:
-    1. Tendencia semanal — un punto por dia (el ultimo snapshot de ese dia
-       si hubo varias ejecuciones), con 4 lineas:
-         - Tasa de interaccion (%) = total_interactions / reach, en el eje
-           izquierdo, en su valor real (suele moverse en decenas de %).
-         - Seguidores, alcance y reproducciones/alcance, las tres
-           INDEXADAS a 100 en el primer dato disponible, en el eje derecho.
-           Se indexan (en vez de mostrar el valor real) porque son cifras en
-           escalas muy distintas entre si — lo que importa para ver
-           progreso es cuanto ha subido o bajado cada una respecto al
-           primer dato, no su valor absoluto.
-       'Reproducciones/alcance' (views/reach) no se deja en valor real junto
-       a la tasa de interaccion aunque las dos sean ratios: en la practica
-       suele moverse en cientos de % (las reproducciones cuentan repasos de
-       carrusel o repeticiones de video, no cuentas unicas), y compartir eje
-       con una tasa de interaccion de decenas de % la aplastaria contra el
-       cero. Indexarla junto a seguidores/alcance evita ese problema.
-       Con pocas semanas de historico este panel se vera casi plano (un
-       punto suelto por linea) — es normal, se vuelve mas util cuanto mas
-       tiempo lleve corriendo el bot.
-    2. Las publicaciones con mas alcance ahora mismo (top 8), para ver de un
-       vistazo que formato esta funcionando.
+Disenada para leerse en el movil, de arriba abajo:
+    1. Cuatro cifras de la semana (alcance, visualizaciones, interacciones y
+       seguidores) con el cambio frente a la semana anterior.
+    2. Cuatro minigraficos, uno por metrica, con las ultimas SEMANAS_GRAFICO
+       semanas dia a dia. Uno por metrica (y no todas en un grafico con dos
+       ejes e indices, como antes) para que las lineas no se monten y cada
+       una se lea en su valor real. La semana actual va sombreada; solo se
+       rotulan el ultimo valor y el maximo, y en el eje X solo los lunes.
+    3. Las publicaciones de los ultimos DIAS_POSTS dias comparadas con la
+       mediana de alcance de la cuenta (antes: siempre el mismo top 8
+       historico, que no cambiaba nunca).
 
 Para no mandar la misma imagen dos veces si el workflow se ejecuta mas de
 una vez con los mismos datos, se guarda un hash de los datos ya mandados en
@@ -41,20 +30,24 @@ en una semana en la que el texto del analisis no cambie, o al reves).
 Variables de entorno requeridas (GitHub Actions Secrets):
     TELEGRAM_BOT_TOKEN   - token del bot de Telegram (el mismo que tts-telegram-bot)
     TELEGRAM_CHAT_ID     - chat_id al que mandar la imagen
+Opcional:
+    SOLO_IMAGEN=ruta.png - genera la imagen ahi y no manda nada (para probar)
 """
 
 import csv
 import hashlib
-import math
 import os
 import re
+import statistics
 import sys
 import tempfile
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")  # sin esto, matplotlib intenta abrir una ventana y falla en GitHub Actions (no hay pantalla)
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import requests
 
@@ -63,14 +56,36 @@ ACCOUNT_CSV = REPO_ROOT / "account_metrics.csv"
 MEDIA_CSV = REPO_ROOT / "media_metrics.csv"
 HASH_MARKER_PATH = REPO_ROOT / ".last_sent_chart_hash"
 
-TOP_POSTS = 8
-COLOR_TASA = "#0F6E56"        # teal — unica linea en valor real (eje izquierdo)
-COLOR_SEGUIDORES = "#534AB7"  # purpura — indexada (eje derecho)
-COLOR_ALCANCE = "#185FA5"     # azul — indexada (eje derecho)
-COLOR_REPRODUCCIONES = "#D85A30"  # coral — indexada (eje derecho)
-COLOR_POSTS = "#C13584"       # magenta — barras del panel 2
-COLOR_TEXT = "#2C2C2A"
-COLOR_MUTED = "#8A8985"
+SEMANAS_GRAFICO = 4
+DIAS_POSTS = 14
+MAX_POSTS = 6
+DIAS_MEDIANA = 90  # posts de los ultimos 90 dias para calcular "tu mediana"
+
+# Colores (paleta de referencia de la skill dataviz, modo claro)
+COLOR_FONDO = "#fcfcfb"
+COLOR_TEXTO = "#0b0b0b"
+COLOR_TEXTO_2 = "#52514e"
+COLOR_APAGADO = "#898781"
+COLOR_REJILLA = "#e1e0d9"
+COLOR_EJE = "#c3c2b7"
+COLOR_SERIE = "#2a78d6"        # una sola serie por minigrafico: siempre el mismo azul
+COLOR_SEMANA = "#f0efec"       # sombreado de la semana actual
+COLOR_SUBE = "#006300"         # texto de "sube" (con flecha, nunca solo color)
+COLOR_BAJA = "#d03b3b"
+
+METRICAS = [
+    # (metrica en el CSV, titulo, se suma en la semana o se toma el ultimo valor)
+    ("reach", "Alcance", "suma"),
+    ("views", "Visualizaciones", "suma"),
+    ("total_interactions", "Interacciones", "suma"),
+    ("followers_count", "Seguidores", "ultimo"),
+]
+
+MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def fecha_corta(d: date) -> str:
+    return f"{d.day} {MESES[d.month - 1]}"
 
 
 def ultimo_valor_por_dia(path: Path, metric: str) -> dict[str, int]:
@@ -104,83 +119,74 @@ def ultimo_valor_por_dia(path: Path, metric: str) -> dict[str, int]:
     return {dia: valor for dia, (_fetched_at, valor) in por_dia.items()}
 
 
-def indexar(valores: list[float | None]) -> list[float | None]:
-    """Reexpresa una serie como indice sobre su primer valor disponible
-    (primer_valor = 100). Une series en escalas muy distintas (seguidores en
-    cientos, alcance en miles...) en un solo eje: lo que se ve es cuanto ha
-    subido o bajado cada una desde el primer dato, no su cifra absoluta."""
-    base = next((v for v in valores if v is not None and v != 0), None)
-    if base is None:
-        return [None] * len(valores)
-    return [(v / base * 100) if v is not None else None for v in valores]
+def resumen_cuenta(path: Path) -> dict | None:
+    """Series diarias de las ultimas SEMANAS_GRAFICO semanas y, por metrica,
+    el valor de esta semana (ultimos 7 dias con dato) frente a la anterior."""
+    series = {m: ultimo_valor_por_dia(path, m) for m, _t, _a in METRICAS}
+    todos = sorted(set().union(*series.values()))
+    if not todos:
+        return None
+    fin = date.fromisoformat(todos[-1])
+    inicio = fin - timedelta(days=SEMANAS_GRAFICO * 7 - 1)
+    semana_desde = fin - timedelta(days=6)
+    anterior_desde = fin - timedelta(days=13)
+
+    resumen = {"fin": fin, "inicio": inicio, "semana_desde": semana_desde, "metricas": {}}
+    for metrica, titulo, agregado in METRICAS:
+        datos = {date.fromisoformat(d): v for d, v in series[metrica].items()}
+        en_rango = sorted((d, v) for d, v in datos.items() if d >= inicio)
+        esta = [v for d, v in datos.items() if semana_desde <= d <= fin]
+        previa = [v for d, v in datos.items() if anterior_desde <= d < semana_desde]
+        if agregado == "suma":
+            actual = sum(esta) if esta else None
+            antes = sum(previa) if previa else None
+        else:
+            actual = datos[max(datos)] if datos else None
+            anteriores = [d for d in datos if d < semana_desde]
+            antes = datos[max(anteriores)] if anteriores else None
+        resumen["metricas"][metrica] = {
+            "titulo": titulo, "agregado": agregado, "serie": en_rango, "actual": actual, "antes": antes,
+            # Con que dia se compara (para "ultimo": puede ser de antes de hace 7 dias si hubo un hueco)
+            "antes_fecha": max(anteriores) if agregado == "ultimo" and anteriores else None,
+        }
+    return resumen
 
 
-def construir_tendencia_semanal(path: Path) -> dict[str, list]:
-    """Une reach, views, total_interactions y followers_count de
-    account_metrics.csv en series diarias alineadas por fecha, y calcula a
-    partir de ahi las 4 lineas del panel de tendencia. Un dia solo entra si
-    tiene reach Y followers_count ese dia (hacen falta los dos para calcular
-    las tasas y el indice de seguidores)."""
-    reach = ultimo_valor_por_dia(path, "reach")
-    views = ultimo_valor_por_dia(path, "views")
-    interacciones = ultimo_valor_por_dia(path, "total_interactions")
-    seguidores = ultimo_valor_por_dia(path, "followers_count")
-
-    dias = sorted(set(reach) & set(seguidores))
-
-    tasa_interaccion_pct: list[float | None] = []
-    seguidores_valores: list[float | None] = []
-    alcance_valores: list[float | None] = []
-    reproducciones_valores: list[float | None] = []
-
-    for dia in dias:
-        r = reach.get(dia)
-        v = views.get(dia)
-        i = interacciones.get(dia)
-        s = seguidores.get(dia)
-
-        tasa_interaccion_pct.append((i / r * 100) if (i is not None and r) else None)
-        seguidores_valores.append(s)
-        alcance_valores.append(r)
-        reproducciones_valores.append(v)
-
-    return {
-        "dias": dias,
-        "tasa_interaccion_pct": tasa_interaccion_pct,
-        "seguidores_idx": indexar(seguidores_valores),
-        "alcance_idx": indexar(alcance_valores),
-        "reproducciones_idx": indexar(reproducciones_valores),
-        # se guardan tambien en crudo, solo para el texto del caption de Telegram
-        "seguidores_ultimo": next((v for v in reversed(seguidores_valores) if v is not None), None),
-        "tasa_interaccion_ultima": next((v for v in reversed(tasa_interaccion_pct) if v is not None), None),
-    }
-
-
-def top_posts_por_alcance(path: Path, top_n: int = TOP_POSTS) -> list[tuple[str, int]]:
-    """Para cada publicacion, el valor MAS RECIENTE de 'reach' (no el
-    historial completo, igual que summarize_media_metrics() en
-    analyze_metrics.py), y devuelve las 'top_n' con mas alcance."""
+def posts_recientes(path: Path) -> tuple[list[dict], float | None]:
+    """Publicaciones de los ultimos DIAS_POSTS dias con su alcance mas
+    reciente, y la mediana de alcance de los posts de los ultimos DIAS_MEDIANA
+    dias (para saber si un post va bien o mal "para lo que es tu cuenta")."""
     if not path.exists():
-        return []
+        return [], None
 
     posts: dict[str, dict] = {}
     with path.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             if row.get("metric") != "reach":
                 continue
-            media_id = row.get("media_id", "")
-            fetched_at = row.get("fetched_at_utc", "")
             try:
                 valor = int(row.get("value", ""))
-            except ValueError:
+                publicado = datetime.fromisoformat(row["posted_at_utc"].replace("+0000", "+00:00")).date()
+            except (ValueError, KeyError):
                 continue
+            media_id = row.get("media_id", "")
+            fetched_at = row.get("fetched_at_utc", "")
             existente = posts.get(media_id)
             if existente is None or fetched_at >= existente["fetched_at"]:
-                caption = (row.get("caption_excerpt", "") or "(sin caption)").strip()
-                posts[media_id] = {"fetched_at": fetched_at, "reach": valor, "caption": caption}
+                caption = (row.get("caption_excerpt", "") or "").strip()
+                posts[media_id] = {"fetched_at": fetched_at, "reach": valor, "caption": caption, "fecha": publicado}
 
-    ordenados = sorted(posts.values(), key=lambda p: p["reach"], reverse=True)[:top_n]
-    return [(p["caption"], p["reach"]) for p in ordenados]
+    if not posts:
+        return [], None
+    ultimo = max(p["fecha"] for p in posts.values())
+    hoy = max(ultimo, date.today())
+    recientes = sorted(
+        (p for p in posts.values() if p["fecha"] > hoy - timedelta(days=DIAS_POSTS)),
+        key=lambda p: p["fecha"], reverse=True,
+    )[:MAX_POSTS]
+    base = [p["reach"] for p in posts.values() if p["fecha"] > hoy - timedelta(days=DIAS_MEDIANA)]
+    mediana = statistics.median(base) if len(base) >= 3 else None
+    return recientes, mediana
 
 
 # DejaVu Sans (la fuente que usa matplotlib) no tiene glifos de emoji: sin
@@ -210,110 +216,145 @@ def etiqueta_corta(caption: str, max_chars: int = 26) -> str:
     return caption[: max_chars - 1].rstrip() + "…"
 
 
-def _plot_linea(ax, dias, valores, color, marker, label, linestyle="-", anotar=True):
-    """Dibuja una linea saltandose los None (dias sin dato para esa
-    metrica) en vez de romper la llamada a plot(), y anota el ultimo valor
-    disponible (salvo que 'anotar' sea False — se desactiva para las lineas
-    indexadas cuando solo hay un dia, porque ese primer valor es SIEMPRE 100
-    por definicion del indice, no aporta nada escribirlo tres veces
-    superpuesto)."""
-    xs = [d for d, v in zip(dias, valores) if v is not None]
-    ys = [v for v in valores if v is not None]
-    if not xs:
-        return None
-    linea, = ax.plot(xs, ys, marker=marker, color=color, linewidth=2, linestyle=linestyle, label=label)
-    if anotar:
-        ax.annotate(
-            f"{ys[-1]:.0f}",
-            (xs[-1], ys[-1]),
-            textcoords="offset points",
-            xytext=(6, 4),
-            fontsize=8,
-            color=color,
-        )
-    return linea
+def miles(n: float) -> str:
+    """1234 -> '1.234' (separador de miles a la espanola)."""
+    return f"{n:,.0f}".replace(",", ".")
 
 
-def generar_grafico(tendencia: dict[str, list], top_posts: list[tuple[str, int]], destino: str):
-    fig, (ax_tendencia, ax_posts) = plt.subplots(
-        2, 1, figsize=(9, 8.5), height_ratios=[1, 1.4], constrained_layout=True
-    )
-    fig.patch.set_facecolor("white")
+def texto_cambio(m: dict) -> tuple[str, str]:
+    """Texto y color del cambio frente a la semana anterior."""
+    actual, antes = m["actual"], m["antes"]
+    if actual is None or antes is None:
+        return "sin semana anterior", COLOR_APAGADO
+    if m["agregado"] == "ultimo":
+        dif = actual - antes
+        desde = f"desde el {fecha_corta(m['antes_fecha'])}"
+        if dif == 0:
+            return f"= igual {desde}", COLOR_APAGADO
+        return (f"▲ +{dif} {desde}", COLOR_SUBE) if dif > 0 else (f"▼ {dif} {desde}", COLOR_BAJA)
+    if antes == 0:
+        return "sin base para comparar", COLOR_APAGADO
+    pct = (actual - antes) / antes * 100
+    if abs(pct) < 1:
+        return "= igual que la anterior", COLOR_APAGADO
+    flecha, color = ("▲", COLOR_SUBE) if pct > 0 else ("▼", COLOR_BAJA)
+    return f"{flecha} {pct:+.0f}% vs semana anterior", color
 
-    # --- Panel 1: tendencia semanal (eje izq. = tasa real, eje der. = indices) ---
-    ax_tendencia.set_title("Tendencia semanal", loc="left", fontsize=14, fontweight="bold", color=COLOR_TEXT)
-    dias = tendencia["dias"]
-    if dias:
-        ax_der = ax_tendencia.twinx()
-        un_solo_dia = len(dias) == 1
 
-        lineas = []
-        lineas.append(_plot_linea(
-            ax_tendencia, dias, tendencia["tasa_interaccion_pct"], COLOR_TASA, "o", "Tasa de interacción (%)"
-        ))
-        lineas.append(_plot_linea(
-            ax_der, dias, tendencia["seguidores_idx"], COLOR_SEGUIDORES, "^", "Seguidores (índice)",
-            linestyle="--", anotar=not un_solo_dia,
-        ))
-        lineas.append(_plot_linea(
-            ax_der, dias, tendencia["alcance_idx"], COLOR_ALCANCE, "D", "Alcance (índice)",
-            linestyle="--", anotar=not un_solo_dia,
-        ))
-        lineas.append(_plot_linea(
-            ax_der, dias, tendencia["reproducciones_idx"], COLOR_REPRODUCCIONES,
-            "s", "Reproducciones/alcance (índice)", linestyle="--", anotar=not un_solo_dia,
-        ))
-        lineas = [l for l in lineas if l is not None]
+def dibujar_cifra(ax, m: dict):
+    ax.axis("off")
+    ax.text(0, 0.92, m["titulo"] + (" (semana)" if m["agregado"] == "suma" else ""),
+            fontsize=10, color=COLOR_TEXTO_2, transform=ax.transAxes, va="top")
+    valor = miles(m["actual"]) if m["actual"] is not None else "—"
+    ax.text(0, 0.62, valor, fontsize=22, fontweight="bold", color=COLOR_TEXTO, transform=ax.transAxes, va="top")
+    texto, color = texto_cambio(m)
+    ax.text(0, 0.08, texto, fontsize=9, color=color, transform=ax.transAxes, va="bottom")
 
-        ax_tendencia.set_ylabel("Tasa de interacción (%)", color=COLOR_TASA, fontsize=9)
-        ax_der.set_ylabel("Índice (primer dato = 100)", color=COLOR_TEXT, fontsize=9)
-        ax_tendencia.legend(handles=lineas, loc="upper left", fontsize=8, frameon=False, ncols=2)
 
-        if un_solo_dia:
-            ax_tendencia.text(
-                0.5,
-                -0.22,
-                "Primer dato registrado — las 3 lineas indexadas parten todas de 100 (se solapan) "
-                "y se separaran con mas semanas de historico.",
-                transform=ax_tendencia.transAxes,
-                ha="center",
-                fontsize=9,
-                color=COLOR_MUTED,
-                style="italic",
-            )
-        ax_tendencia.margins(x=0.15, y=0.3)
-        ax_der.margins(y=0.3)
-        ax_der.spines[["top", "left"]].set_visible(False)
+def dibujar_minigrafico(ax, m: dict, resumen: dict):
+    ax.set_facecolor(COLOR_FONDO)
+    ax.set_title(m["titulo"], loc="left", fontsize=11, fontweight="bold", color=COLOR_TEXTO, pad=6)
+    ax.axvspan(resumen["semana_desde"] - timedelta(hours=12), resumen["fin"] + timedelta(days=1.5),
+               color=COLOR_SEMANA, zorder=0, lw=0)
+    serie = m["serie"]
+    if not serie:
+        ax.text(0.5, 0.5, "Sin datos", transform=ax.transAxes, ha="center", va="center", color=COLOR_APAGADO)
     else:
-        ax_tendencia.text(
-            0.5, 0.5, "Todavia no hay suficientes datos de cuenta.",
-            transform=ax_tendencia.transAxes, ha="center", va="center", color=COLOR_MUTED,
-        )
-    ax_tendencia.spines[["top", "right"]].set_visible(False)
-    ax_tendencia.tick_params(axis="x", colors=COLOR_MUTED, labelsize=9)
-    ax_tendencia.tick_params(axis="y", colors=COLOR_TASA, labelsize=9)
+        # Tramos de dias seguidos con linea continua; los huecos (dias sin dato) con linea punteada
+        tramo = [serie[0]]
+        for anterior, actual in zip(serie, serie[1:]):
+            if (actual[0] - anterior[0]).days > 1:
+                ax.plot(*zip(*tramo), color=COLOR_SERIE, lw=2, zorder=3)
+                ax.plot([anterior[0], actual[0]], [anterior[1], actual[1]],
+                        color=COLOR_SERIE, lw=1.2, ls=":", alpha=0.6, zorder=2)
+                tramo = []
+            tramo.append(actual)
+        ax.plot(*zip(*tramo), color=COLOR_SERIE, lw=2, zorder=3)
 
-    # --- Panel 2: publicaciones con mas alcance ---
-    ax_posts.set_title(
-        "Publicaciones con mas alcance ahora mismo", loc="left", fontsize=14, fontweight="bold", color=COLOR_TEXT
+        # Solo dos etiquetas: el ultimo valor y el maximo (si no es el mismo punto)
+        ultimo = serie[-1]
+        ax.scatter([ultimo[0]], [ultimo[1]], s=36, color=COLOR_SERIE, edgecolor=COLOR_FONDO, lw=1.5, zorder=4)
+        ax.annotate(miles(ultimo[1]), ultimo, textcoords="offset points", xytext=(0, 8),
+                    ha="center", fontsize=9, fontweight="bold", color=COLOR_TEXTO)
+        if m["agregado"] == "suma":
+            maximo = max(serie, key=lambda p: p[1])
+            if maximo != ultimo:
+                ax.scatter([maximo[0]], [maximo[1]], s=24, color=COLOR_SERIE, zorder=4)
+                ax.annotate(f"máx. {miles(maximo[1])}\n{fecha_corta(maximo[0])}", maximo,
+                            textcoords="offset points", xytext=(0, 6), ha="center", va="bottom",
+                            fontsize=8, color=COLOR_TEXTO_2)
+        valores = [v for _d, v in serie]
+        bajo, alto = min(valores), max(valores)
+        margen = (alto - bajo) * 0.35 or max(alto * 0.05, 1)
+        ax.set_ylim(0 if m["agregado"] == "suma" else bajo - margen, alto + margen)
+
+    ax.set_xlim(resumen["inicio"] - timedelta(days=0.5), resumen["fin"] + timedelta(days=1.5))
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _p: fecha_corta(mdates.num2date(x).date())))
+    ax.yaxis.set_major_locator(plt.MaxNLocator(3, integer=True))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _p: miles(y)))
+    ax.grid(axis="y", color=COLOR_REJILLA, lw=0.8)
+    ax.set_axisbelow(True)
+    ax.spines[["top", "right", "left"]].set_visible(False)
+    ax.spines["bottom"].set_color(COLOR_EJE)
+    ax.tick_params(colors=COLOR_APAGADO, labelsize=8, length=0)
+
+
+def dibujar_posts(ax, posts: list[dict], mediana: float | None):
+    ax.set_facecolor(COLOR_FONDO)
+    ax.set_title(f"Tus publicaciones de los últimos {DIAS_POSTS} días", loc="left",
+                 fontsize=11, fontweight="bold", color=COLOR_TEXTO, pad=6)
+    if not posts:
+        ax.text(0.5, 0.5, f"No has publicado en los últimos {DIAS_POSTS} días.",
+                transform=ax.transAxes, ha="center", va="center", color=COLOR_APAGADO)
+        ax.axis("off")
+        return
+    filas = posts[::-1]  # la mas reciente arriba
+    etiquetas = [f"{etiqueta_corta(p['caption'])}  ·  {fecha_corta(p['fecha'])}" for p in filas]
+    valores = [p["reach"] for p in filas]
+    barras = ax.barh(range(len(filas)), valores, color=COLOR_SERIE, height=0.55, zorder=3)
+    ax.bar_label(barras, labels=[miles(v) for v in valores], padding=4, fontsize=9, color=COLOR_TEXTO)
+    ax.set_yticks(range(len(filas)), etiquetas)
+    tope = max(valores + ([mediana] if mediana else []))
+    ax.set_xlim(0, tope * 1.35)
+    if mediana:
+        ax.axvline(mediana, color=COLOR_TEXTO_2, lw=1.2, ls="--", zorder=4)
+        ax.text(mediana, len(filas) - 0.45, f"  tu mediana: {miles(mediana)}", fontsize=8,
+                color=COLOR_TEXTO_2, ha="left", va="bottom")
+    ax.set_ylim(-0.6, len(filas) - 0.1)
+    ax.xaxis.set_visible(False)
+    ax.spines[["top", "right", "bottom"]].set_visible(False)
+    ax.spines["left"].set_color(COLOR_EJE)
+    ax.tick_params(axis="y", colors=COLOR_TEXTO, labelsize=9, length=0)
+    ax.text(0, -0.08, "Alcance acumulado hasta hoy: los posts más nuevos aún están creciendo.",
+            transform=ax.transAxes, fontsize=8, color=COLOR_APAGADO, va="top")
+
+
+def generar_grafico(resumen: dict, posts: list[dict], mediana: float | None, destino: str):
+    n_posts = max(len(posts), 2)
+    fig = plt.figure(figsize=(8, 10.5 + 0.35 * n_posts), facecolor=COLOR_FONDO)
+    gs = fig.add_gridspec(
+        4, 4, height_ratios=[0.6, 1.6, 1.6, 0.55 + 0.32 * n_posts],
+        left=0.06, right=0.95, top=0.91, bottom=0.04, hspace=0.45, wspace=0.35,
     )
-    if top_posts:
-        etiquetas = [etiqueta_corta(caption) for caption, _reach in top_posts][::-1]
-        valores = [reach for _caption, reach in top_posts][::-1]
-        barras = ax_posts.barh(etiquetas, valores, color=COLOR_POSTS, height=0.6)
-        ax_posts.bar_label(barras, padding=4, fontsize=9, color=COLOR_TEXT)
-        ax_posts.tick_params(axis="y", labelsize=9, colors=COLOR_TEXT)
-        ax_posts.tick_params(axis="x", colors=COLOR_MUTED, labelsize=9)
-        ax_posts.set_xlabel("Alcance", color=COLOR_MUTED, fontsize=9)
-        ax_posts.spines[["top", "right"]].set_visible(False)
-    else:
-        ax_posts.text(
-            0.5, 0.5, "Todavia no hay publicaciones con metricas.",
-            transform=ax_posts.transAxes, ha="center", va="center", color=COLOR_MUTED,
-        )
-        ax_posts.axis("off")
+    fig.text(0.06, 0.965, "Instagram · resumen semanal", fontsize=17, fontweight="bold", color=COLOR_TEXTO)
+    fig.text(0.06, 0.94, f"Semana del {fecha_corta(resumen['semana_desde'])} al {fecha_corta(resumen['fin'])}"
+             "  ·  zona sombreada = esta semana", fontsize=10, color=COLOR_TEXTO_2)
 
-    fig.savefig(destino, dpi=150, facecolor="white")
+    metricas = [resumen["metricas"][m] for m, _t, _a in METRICAS]
+    for i, m in enumerate(metricas):
+        dibujar_cifra(fig.add_subplot(gs[0, i]), m)
+    posiciones = [gs[1, 0:2], gs[1, 2:4], gs[2, 0:2], gs[2, 2:4]]
+    for pos, m in zip(posiciones, metricas):
+        dibujar_minigrafico(fig.add_subplot(pos), m, resumen)
+
+    # Columna de etiquetas a la izquierda para los posts: el panel empieza mas a la derecha
+    ax_posts = fig.add_subplot(gs[3, :])
+    caja = ax_posts.get_position()
+    ax_posts.set_position([caja.x0 + 0.3, caja.y0, caja.width - 0.3, caja.height])
+    dibujar_posts(ax_posts, posts, mediana)
+
+    fig.savefig(destino, dpi=150, facecolor=COLOR_FONDO)
     plt.close(fig)
 
 
@@ -331,28 +372,26 @@ def send_photo_telegram(photo_path: str, caption: str, token: str, chat_id: str)
 
 
 def main():
+    resumen = resumen_cuenta(ACCOUNT_CSV)
+    posts, mediana = posts_recientes(MEDIA_CSV)
+    if resumen is None:
+        print("No hay datos todavia en los CSV — nada que graficar. Saliendo sin error.")
+        return
+
+    solo_imagen = os.environ.get("SOLO_IMAGEN", "").strip()
+    if solo_imagen:
+        generar_grafico(resumen, posts, mediana, solo_imagen)
+        print(f"Imagen generada en {solo_imagen} (no se manda nada).")
+        return
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
         sys.exit("Error: faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en el entorno.")
 
-    tendencia = construir_tendencia_semanal(ACCOUNT_CSV)
-    top_posts = top_posts_por_alcance(MEDIA_CSV)
-
-    if not tendencia["dias"] and not top_posts:
-        print("No hay datos todavia en los CSV — nada que graficar. Saliendo sin error.")
-        return
-
     firma = "|".join(
-        f"{d}:{ti}:{s}:{a}:{r}"
-        for d, ti, s, a, r in zip(
-            tendencia["dias"],
-            tendencia["tasa_interaccion_pct"],
-            tendencia["seguidores_idx"],
-            tendencia["alcance_idx"],
-            tendencia["reproducciones_idx"],
-        )
-    ) + "#" + "|".join(f"{c}:{r}" for c, r in top_posts)
+        f"{m}:{d}:{v}" for m, datos in resumen["metricas"].items() for d, v in datos["serie"]
+    ) + "#" + "|".join(f"{p['caption']}:{p['reach']}" for p in posts)
     firma_hash = hashlib.sha256(firma.encode("utf-8")).hexdigest()
     hash_anterior = HASH_MARKER_PATH.read_text(encoding="utf-8").strip() if HASH_MARKER_PATH.exists() else ""
     if firma_hash == hash_anterior:
@@ -365,15 +404,10 @@ def main():
             ruta_imagen = tmp.name
 
         print("Generando el grafico...")
-        generar_grafico(tendencia, top_posts, ruta_imagen)
+        generar_grafico(resumen, posts, mediana, ruta_imagen)
 
-        caption = "Resumen visual de la semana."
-        if tendencia["seguidores_ultimo"] is not None:
-            caption += f" {tendencia['seguidores_ultimo']:.0f} seguidores"
-        if tendencia["tasa_interaccion_ultima"] is not None:
-            caption += f", {tendencia['tasa_interaccion_ultima']:.1f}% de tasa de interacción"
-        caption += "."
-
+        caption = (f"Resumen de la semana del {fecha_corta(resumen['semana_desde'])} "
+                   f"al {fecha_corta(resumen['fin'])}.")
         print("Mandando el grafico por Telegram...")
         send_photo_telegram(ruta_imagen, caption, token, chat_id)
         print("Enviado correctamente.")

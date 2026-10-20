@@ -19,10 +19,14 @@ Variables de entorno opcionales:
 
 import csv
 import os
+import statistics
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
+
+from send_weekly_chart import fecha_corta, resumen_cuenta
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACCOUNT_CSV = REPO_ROOT / "account_metrics.csv"
@@ -31,114 +35,120 @@ ANALYSIS_PATH = REPO_ROOT / "weekly_analysis.txt"
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
-# Cuantas fotos/snapshots como maximo se le mandan a Claude — de sobra para
-# el uso real, y evita que el prompt crezca sin limite a medida que los CSV
-# se acumulan (son append-only, solo crecen). fetch_metrics.py ahora corre a
-# diario (antes semanal), asi que 28 snapshots cubren unas 4 semanas de datos
-# dia a dia en vez de solo 12 semanas de fotos sueltas — necesario para que
-# el analisis pueda comparar el comportamiento entre dias, no solo semana
-# contra semana.
-MAX_ACCOUNT_SNAPSHOTS = 28
-MAX_MEDIA_POSTS = 40
+PROMPT_TEMPLATE = """Preparas el resumen semanal HABLADO de la cuenta de Instagram de Miguel \
+Ángel, fotógrafo (retrato, books, polaroids para modelos y artistas). Lo escucha en Telegram con un \
+motor de texto a voz, así que escribe PROSA CONTINUA en español: nada de markdown, viñetas, emojis, \
+encabezados ni enlaces.
 
-PROMPT_TEMPLATE = """Eres un analista que le prepara a Miguel Ángel un resumen semanal hablado \
-sobre el rendimiento de su cuenta de Instagram. Te paso dos resumenes ya procesados (no CSV en \
-bruto): uno con los ultimos snapshots DIARIOS de metricas de cuenta (uno por dia, no por semana), \
-ordenados del mas antiguo al mas reciente, y otro con el ESTADO ACTUAL de cada publicacion (el \
-dato mas reciente de cada una, no el historial completo), ordenado de la publicacion mas reciente \
-a la mas antigua.
+Las cifras ya están calculadas (abajo). No recites datos día a día ni repitas todas las cifras: \
+elige lo que de verdad importa.
 
-Tu tarea: escribir un analisis en espanol, de 150 a 250 palabras, en PROSA CONTINUA — nada de \
-markdown, viñetas, tablas, emojis ni encabezados, porque este texto lo va a leer en voz alta un \
-motor de texto a voz tal cual se lo mandes. Debe sonar como si se lo contaras a Miguel en persona: \
-empieza con una frase resumen y luego desarrolla 3 o 5 puntos concretos y utiles.
+Estructura, de 80 a 150 palabras en total:
+1. Una frase titular con lo más importante de la semana: el cambio más grande, para bien o para \
+mal, con su cifra.
+2. Dos o tres hechos concretos que hayan cambiado respecto a la semana anterior, con números. \
+Si hay publicaciones nuevas, compáralas con su mediana (alcance, y guardados y compartidos por cada \
+100 cuentas alcanzadas: dicen más que los likes).
+3. Una sola recomendación concreta y comprobable para la semana que viene (qué publicar, cuándo \
+o en qué formato), apoyada en los datos. Si el informe anterior dio una recomendación, di \
+primero en una frase si se siguió y si funcionó según los datos.
 
-Cosas que deberias mirar si los datos lo permiten (usa el 'followers_count' del ultimo snapshot \
-de cuenta como referencia de audiencia):
-- Como ha ido el alcance/interacciones dia a dia en la ultima semana (subiendo, bajando, estable, \
-con picos o dias flojos sueltos) — no te limites a comparar solo el ultimo snapshot contra el \
-anterior, mira la serie de los ultimos 7-10 dias si hay datos suficientes.
-- Si hay algun patron por dia de la semana (p.ej. findes mas flojos o mas fuertes que entre \
-semana), dilo solo si se ve con varias semanas de datos, no a partir de uno o dos dias sueltos.
-- Que publicacion de la lista (que ya esta ordenada de mas reciente a mas antigua) tiene mas \
-alcance y cual menos, expresado como porcentaje de los seguidores actuales.
-- Cualquier patron que destaque: formato que retiene mas reproducciones (views mucho mayor que \
-reach), cadencia de publicacion muy irregular mirando las fechas, una racha de posts flojos, etc.
-- Si varios snapshots diarios seguidos tienen valores identicos, o si la publicacion mas reciente \
-de la lista lleva ya muchos dias, dilo explicitamente en vez de asumir que es una foto nueva o una \
-bajada real.
+Prohibido:
+- Frases de relleno que no dicen nada nuevo: «no hay datos suficientes», «rendimiento irregular», \
+«cadencia irregular», «sin tendencia clara», «conviene tomarlo como indicio». Solo puedes hablar de \
+la frecuencia de publicación si cambió claramente respecto a lo habitual.
+- Repetir ideas del informe anterior que no hayan cambiado.
+- Inventar causas que los datos no muestran (fines de semana, algoritmo…) salvo que las cifras \
+lo dejen claro.
 
---- snapshots de account_metrics.csv (mas antiguo primero) ---
-{account_summary}
+--- cifras de la semana ---
+{hechos}
 
---- estado actual de cada publicacion, de media_metrics.csv (mas reciente primero) ---
-{media_summary}
+--- informe de la semana pasada (no lo repitas) ---
+{informe_anterior}
 
-Escribe solo el texto del analisis, sin ningun comentario tuyo antes o despues."""
+Escribe solo el texto del análisis, sin ningún comentario antes o después."""
+
+DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 
-def summarize_account_metrics(path: Path, max_snapshots: int = MAX_ACCOUNT_SNAPSHOTS) -> str:
-    """Agrupa las filas de account_metrics.csv por fecha/hora de ejecucion
-    (fetched_at_utc) y devuelve una linea por snapshot, con todas sus
-    metricas juntas — mucho mas legible y compacto que el CSV en bruto, y no
-    hace falta recortar por caracteres porque un snapshot siempre es una
-    linea corta."""
-    if not path.exists():
-        return "(no existe todavia)"
+def pct(actual, antes) -> str:
+    if actual is None or not antes:
+        return "sin semana anterior para comparar"
+    return f"{(actual - antes) / antes * 100:+.0f}% frente a la semana anterior ({antes})"
 
-    snapshots: dict[str, dict[str, str]] = {}
-    with path.open(newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            ts = row.get("fetched_at_utc", "")
-            snapshots.setdefault(ts, {})[row.get("metric", "")] = row.get("value", "")
 
-    if not snapshots:
-        return "(vacio)"
-
-    ordenados = sorted(snapshots.items(), key=lambda kv: kv[0])[-max_snapshots:]
-    lineas = []
-    for ts, metricas in ordenados:
-        pares = ", ".join(f"{metrica}={valor}" for metrica, valor in metricas.items())
-        lineas.append(f"{ts}: {pares}")
+def cifras_de_la_semana() -> str:
+    """Los mismos numeros que la grafica semanal (send_weekly_chart.py), ya
+    comparados, para que Claude no tenga que hacer cuentas ni recite datos
+    en bruto. Antes recibia los snapshots diarios tal cual y acababa
+    recitandolos dia a dia («cayo a 85, luego a 47…»)."""
+    resumen = resumen_cuenta(ACCOUNT_CSV)
+    if resumen is None:
+        return "(todavía no hay datos de cuenta)"
+    m = resumen["metricas"]
+    lineas = [f"Semana del {fecha_corta(resumen['semana_desde'])} al {fecha_corta(resumen['fin'])}."]
+    for clave in ("reach", "views", "total_interactions"):
+        datos = m[clave]
+        lineas.append(f"- {datos['titulo']} (suma de la semana): {datos['actual']}, {pct(datos['actual'], datos['antes'])}.")
+    seg = m["followers_count"]
+    if seg["actual"] is not None and seg["antes"] is not None:
+        lineas.append(f"- Seguidores: {seg['actual']} ({seg['actual'] - seg['antes']:+d} desde el {fecha_corta(seg['antes_fecha'])}).")
+    elif seg["actual"] is not None:
+        lineas.append(f"- Seguidores: {seg['actual']}.")
+    semana = [(d, v) for d, v in m["reach"]["serie"] if d >= resumen["semana_desde"]]
+    if len(semana) >= 3:
+        mejor = max(semana, key=lambda p: p[1])
+        peor = min(semana, key=lambda p: p[1])
+        lineas.append(f"- Mejor día de alcance: {DIAS_SEMANA[mejor[0].weekday()]} {fecha_corta(mejor[0])} ({mejor[1]}); "
+                      f"peor: {DIAS_SEMANA[peor[0].weekday()]} {fecha_corta(peor[0])} ({peor[1]}).")
+    lineas.append(publicaciones(resumen))
     return "\n".join(lineas)
 
 
-def summarize_media_metrics(path: Path, max_posts: int = MAX_MEDIA_POSTS) -> str:
-    """Para cada publicacion, se queda solo con el valor MAS RECIENTE de
-    cada metrica (no el historial completo) y ordena por fecha de
-    publicacion real (posted_at_utc), de mas reciente a mas antigua. Esto
-    evita el bug de recortar el CSV en bruto por numero de caracteres, que
-    podia cortar justo las publicaciones mas nuevas si el archivo era largo
-    (las filas de la ejecucion mas reciente se escriben publicacion-nueva-
-    primero, asi que un recorte por "ultimas lineas del archivo" se quedaba
-    con las publicaciones MAS VIEJAS de esa tanda, no las mas nuevas)."""
-    if not path.exists():
-        return "(no existe todavia)"
-
+def publicaciones(resumen: dict) -> str:
+    """Posts de esta semana frente a la mediana de los ultimos 90 dias, con
+    guardados y compartidos por cada 100 de alcance."""
+    if not MEDIA_CSV.exists():
+        return "- Publicaciones: sin datos."
     posts: dict[str, dict] = {}
-    with path.open(newline="", encoding="utf-8") as f:
+    with MEDIA_CSV.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            media_id = row.get("media_id", "")
-            post = posts.setdefault(media_id, {
-                "posted_at_utc": row.get("posted_at_utc", ""),
-                "caption_excerpt": row.get("caption_excerpt", ""),
-                "metrics": {},
-            })
-            metric = row.get("metric", "")
-            fetched_at = row.get("fetched_at_utc", "")
-            existente = post["metrics"].get(metric)
-            if existente is None or fetched_at >= existente[1]:
-                post["metrics"][metric] = (row.get("value", ""), fetched_at)
+            post = posts.setdefault(row.get("media_id", ""), {
+                "fecha": row.get("posted_at_utc", "")[:10], "caption": row.get("caption_excerpt", ""), "m": {}})
+            anterior = post["m"].get(row.get("metric", ""))
+            if anterior is None or row.get("fetched_at_utc", "") >= anterior[1]:
+                try:
+                    post["m"][row.get("metric", "")] = (int(row.get("value", "")), row.get("fetched_at_utc", ""))
+                except ValueError:
+                    pass
 
-    if not posts:
-        return "(vacio)"
+    def ratio(p, metrica):
+        alcance = p["m"].get("reach", (0, ""))[0]
+        return p["m"].get(metrica, (0, ""))[0] / alcance * 100 if alcance else None
 
-    ordenados = sorted(posts.values(), key=lambda p: p["posted_at_utc"], reverse=True)[:max_posts]
-    lineas = []
-    for post in ordenados:
-        pares = ", ".join(f"{metrica}={valor}" for metrica, (valor, _fetched_at) in post["metrics"].items())
-        caption = post["caption_excerpt"] or "(sin caption)"
-        lineas.append(f'{post["posted_at_utc"]} — "{caption}": {pares}')
+    desde_90 = (resumen["fin"] - timedelta(days=90)).isoformat()
+    base = [p for p in posts.values() if p["fecha"] >= desde_90 and "reach" in p["m"]]
+    if len(base) < 3:
+        return "- Publicaciones: muy pocas para comparar."
+    mediana = lambda valores: statistics.median([v for v in valores if v is not None])
+    med_alcance = mediana([p["m"]["reach"][0] for p in base])
+    med_guardados = mediana([ratio(p, "saved") for p in base])
+    med_compartidos = mediana([ratio(p, "shares") for p in base])
+    lineas = [f"- Mediana de tus publicaciones de los últimos 90 días ({len(base)} posts): alcance {med_alcance:.0f}, "
+              f"guardados {med_guardados:.1f} y compartidos {med_compartidos:.1f} por cada 100 cuentas alcanzadas."]
+
+    semana = sorted((p for p in base if p["fecha"] >= resumen["semana_desde"].isoformat()), key=lambda p: p["fecha"])
+    por_semana = len(base) / (90 / 7)
+    lineas.append(f"- Publicaciones esta semana: {len(semana)} (lo habitual: {por_semana:.1f} por semana).")
+    for p in semana:
+        texto = (p["caption"] or "sin texto").replace("\n", " ")[:60]
+        lineas.append(f"  · {p['fecha']} «{texto}»: alcance {p['m']['reach'][0]} (aún creciendo), "
+                      f"guardados {ratio(p, 'saved'):.1f}/100, compartidos {ratio(p, 'shares'):.1f}/100.")
+    if not semana:
+        ultima = max(base, key=lambda p: p["fecha"])
+        dias = (resumen["fin"] - date.fromisoformat(ultima["fecha"])).days
+        lineas.append(f"  · Ninguna nueva; la última fue hace {dias} días.")
     return "\n".join(lineas)
 
 
@@ -149,13 +159,15 @@ def main():
 
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
 
-    account_summary = summarize_account_metrics(ACCOUNT_CSV)
-    media_summary = summarize_media_metrics(MEDIA_CSV)
-
-    if account_summary == "(no existe todavia)" and media_summary == "(no existe todavia)":
+    if not ACCOUNT_CSV.exists():
         sys.exit("Error: no hay CSV que analizar todavia (fetch_metrics.py deberia correr antes que este script).")
 
-    prompt = PROMPT_TEMPLATE.format(account_summary=account_summary, media_summary=media_summary)
+    hechos = cifras_de_la_semana()
+    informe_anterior = ANALYSIS_PATH.read_text(encoding="utf-8").strip() if ANALYSIS_PATH.exists() else "(no hay)"
+    prompt = PROMPT_TEMPLATE.format(hechos=hechos, informe_anterior=informe_anterior)
+    if os.environ.get("SOLO_PROMPT"):
+        print(prompt)
+        return
 
     print(f"Pidiendo el analisis a {model}...")
     resp = requests.post(
