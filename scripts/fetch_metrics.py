@@ -58,6 +58,10 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACCOUNT_CSV = REPO_ROOT / "account_metrics.csv"
 MEDIA_CSV = REPO_ROOT / "media_metrics.csv"
+# Catalogo de TODAS las publicaciones con su formato (se reescribe entero en
+# cada ejecucion; no es historico como los otros dos CSV)
+MEDIA_INFO_CSV = REPO_ROOT / "media_info.csv"
+MEDIA_INFO_HEADER = ["media_id", "posted_at_utc", "formato", "permalink"]
 
 # Tokens con prefijo IGAA (Instagram API con inicio de sesion de Instagram,
 # igual que el bot de publicacion) solo son validos contra este host.
@@ -84,7 +88,16 @@ ACCOUNT_METRICS = [
     "reposts",
     "accounts_engaged",
     "total_interactions",
+    # Probadas en vivo el 2026-10-21: pese a lo que dice arriba, con este
+    # acceso (Instagram Login) profile_views y website_clicks SI devuelven datos.
+    "profile_views",
+    "website_clicks",
 ]
+
+# 'follows_and_unfollows' solo trae valores pidiendo breakdown=follow_type:
+# FOLLOWER = cuentas que empezaron a seguirte, NON_FOLLOWER = las que dejaron
+# de seguirte. Se guardan como dos metricas: 'follows' y 'unfollows'.
+FOLLOW_METRICS = {"FOLLOWER": "follows", "NON_FOLLOWER": "unfollows"}
 
 # Metricas por publicacion.
 MEDIA_METRICS = [
@@ -127,29 +140,41 @@ def append_csv_rows(path: Path, header: list[str], rows: list[list]):
         writer.writerows(rows)
 
 
-def fetch_account_insights(account_id: str, access_token: str) -> list[list]:
-    """Pide cada metrica de ACCOUNT_METRICS por separado (period=day,
-    metric_type=total_value — formato que exigen las metricas de cuenta
-    actuales de Meta; el formato antiguo de serie temporal sin metric_type
-    ya no vale para accounts_engaged/total_interactions y da valores
-    enganosos, tipo 0, para follower_count). Si una metrica falla, se avisa
-    por consola y se sigue con las demas — nunca se corta la ejecucion
-    entera por una sola metrica no soportada."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    rows = []
-    for metric in ACCOUNT_METRICS:
-        params = {
-            "metric": metric,
-            "period": "day",
-            "metric_type": "total_value",
-            "access_token": access_token,
-        }
-        resp = requests.get(f"{GRAPH_API_BASE}/{account_id}/insights", params=params, timeout=30)
+def pedir_metricas_cuenta(account_id: str, access_token: str, since: int | None = None,
+                          until: int | None = None) -> dict[str, int]:
+    """{metrica: valor} de ACCOUNT_METRICS mas follows/unfollows. Sin since/until,
+    lo que Meta da por defecto para period=day (las ultimas 24 h); con ellos,
+    el total de ese intervalo (lo usa backfill_account.py).
+
+    Cada metrica se pide por separado (period=day, metric_type=total_value —
+    formato que exigen las metricas de cuenta actuales de Meta; el formato
+    antiguo de serie temporal sin metric_type ya no vale para
+    accounts_engaged/total_interactions y da valores enganosos, tipo 0, para
+    follower_count). Si una metrica falla, se avisa por consola y se sigue con
+    las demas — nunca se corta la ejecucion entera por una sola metrica."""
+    base = {"period": "day", "metric_type": "total_value", "access_token": access_token}
+    if since is not None:
+        base.update(since=since, until=until)
+    valores: dict[str, int] = {}
+    peticiones = [(m, {"metric": m}) for m in ACCOUNT_METRICS]
+    peticiones.append(("follows_and_unfollows", {"metric": "follows_and_unfollows", "breakdown": "follow_type"}))
+    for metric, extra in peticiones:
+        resp = requests.get(f"{GRAPH_API_BASE}/{account_id}/insights", params={**base, **extra}, timeout=30)
         if not resp.ok:
             print(f"Aviso: no se pudo leer la metrica de cuenta '{metric}': {resp.text}")
             continue
         for entry in resp.json().get("data", []):
             total_value = entry.get("total_value", {})
+            for desglose in total_value.get("breakdowns", []):
+                for resultado in desglose.get("results", []):
+                    nombre = FOLLOW_METRICS.get((resultado.get("dimension_values") or [""])[0])
+                    if nombre:
+                        valores[nombre] = resultado.get("value", 0)
+            if metric == "follows_and_unfollows":
+                # Sin resultados en el desglose = nadie siguio ni dejo de seguir
+                valores.setdefault("follows", 0)
+                valores.setdefault("unfollows", 0)
+                continue
             value = total_value.get("value")
             if value is None:
                 # Por si alguna metrica concreta devuelve el formato antiguo
@@ -157,10 +182,14 @@ def fetch_account_insights(account_id: str, access_token: str) -> list[list]:
                 values = entry.get("values", [])
                 if values:
                     value = values[-1].get("value")
-            if value is None:
-                continue
-            rows.append([now, metric, value, ""])
-    return rows
+            if value is not None:
+                valores[metric] = value
+    return valores
+
+
+def fetch_account_insights(account_id: str, access_token: str) -> list[list]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return [[now, metric, value, ""] for metric, value in pedir_metricas_cuenta(account_id, access_token).items()]
 
 
 def fetch_account_fields(account_id: str, access_token: str) -> list[list]:
@@ -197,6 +226,37 @@ def fetch_recent_media(account_id: str, access_token: str, count: int) -> list[d
     resp = requests.get(f"{GRAPH_API_BASE}/{account_id}/media", params=params, timeout=30)
     _raise_with_body(resp)
     return resp.json().get("data", [])[:count]
+
+
+def formato(item: dict) -> str:
+    """Reel, carrusel, foto o video, a partir de media_type y media_product_type."""
+    if item.get("media_product_type") == "REELS":
+        return "reel"
+    return {"CAROUSEL_ALBUM": "carrusel", "IMAGE": "foto", "VIDEO": "vídeo"}.get(item.get("media_type", ""), "otro")
+
+
+def actualizar_catalogo(account_id: str, access_token: str):
+    """Reescribe media_info.csv con TODAS las publicaciones y su formato
+    (unas pocas llamadas paginadas de 100; el formato no cambia nunca, pero
+    asi tambien entran las publicaciones antiguas sin hacer nada aparte)."""
+    filas = []
+    url = f"{GRAPH_API_BASE}/{account_id}/media"
+    params = {"fields": "id,timestamp,media_type,media_product_type,permalink",
+              "access_token": access_token, "limit": 100}
+    while url:
+        resp = requests.get(url, params=params, timeout=30)
+        if not resp.ok:
+            print(f"Aviso: no se pudo actualizar el catalogo de publicaciones: {resp.text}")
+            return
+        datos = resp.json()
+        filas += [[i["id"], i.get("timestamp", ""), formato(i), i.get("permalink", "")] for i in datos.get("data", [])]
+        url = datos.get("paging", {}).get("next")
+        params = None  # la URL "next" ya lleva todos los parametros
+    with MEDIA_INFO_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(MEDIA_INFO_HEADER)
+        writer.writerows(filas)
+    print(f"  {len(filas)} publicaciones en {MEDIA_INFO_CSV.name}")
 
 
 def fetch_media_insights(media_id: str, access_token: str) -> dict:
@@ -257,6 +317,9 @@ def main():
 
     append_csv_rows(MEDIA_CSV, MEDIA_CSV_HEADER, media_rows)
     print(f"  {len(media_rows)} filas anadidas a {MEDIA_CSV.name}")
+
+    print("Actualizando el catalogo de publicaciones (formato de cada una)...")
+    actualizar_catalogo(account_id, access_token)
 
 
 if __name__ == "__main__":

@@ -21,37 +21,17 @@ import os
 import sys
 from datetime import date, datetime, time, timedelta, timezone
 
-import requests
-
-from fetch_metrics import ACCOUNT_CSV, ACCOUNT_METRICS, GRAPH_API_BASE
+from fetch_metrics import ACCOUNT_CSV, pedir_metricas_cuenta
 
 
-def total_del_dia(account_id: str, token: str, metric: str, dia: date) -> int | None:
-    inicio = datetime.combine(dia, time(0), timezone.utc)
-    params = {
-        "metric": metric,
-        "period": "day",
-        "metric_type": "total_value",
-        "since": int(inicio.timestamp()),
-        "until": int((inicio + timedelta(days=1)).timestamp()),
-        "access_token": token,
-    }
-    resp = requests.get(f"{GRAPH_API_BASE}/{account_id}/insights", params=params, timeout=30)
-    if not resp.ok:
-        print(f"  Aviso: {metric} del {dia}: {resp.text}")
-        return None
-    for entry in resp.json().get("data", []):
-        valor = entry.get("total_value", {}).get("value")
-        if valor is not None:
-            return valor
-    return None
-
-
-def dias_con_datos() -> set[str]:
+def datos_existentes() -> set[tuple[str, str]]:
+    """(dia, metrica) que ya estan en el CSV: solo se rellena lo que falta, asi
+    tambien sirve para anadir hacia atras una metrica nueva en dias que ya
+    tenian las demas."""
     if not ACCOUNT_CSV.exists():
         return set()
     with ACCOUNT_CSV.open(newline="", encoding="utf-8") as f:
-        return {row["fetched_at_utc"][:10] for row in csv.DictReader(f)}
+        return {(row["fetched_at_utc"][:10], row["metric"]) for row in csv.DictReader(f)}
 
 
 def main():
@@ -60,19 +40,21 @@ def main():
     desde = date.fromisoformat(os.environ["DESDE"])
     hasta = date.fromisoformat(os.environ["HASTA"])
     prueba = os.environ.get("PRUEBA", "true").lower() == "true"
-    ya_hay = dias_con_datos()
+    ya_hay = datos_existentes()
 
     filas = []
     dia = desde
     while dia <= hasta:
         periodo = dia - timedelta(days=1)
-        marca = "(ya hay datos de este dia)" if dia.isoformat() in ya_hay else ""
-        valores = {m: total_del_dia(account_id, token, m, periodo) for m in ACCOUNT_METRICS}
-        print(f"{dia} (total del {periodo}): " + ", ".join(f"{m}={v}" for m, v in valores.items()) + f" {marca}")
-        if not marca:
-            recogida = datetime.combine(dia, time(8), timezone.utc).isoformat(timespec="seconds")
-            fin = datetime.combine(dia, time(0), timezone.utc).isoformat(timespec="seconds")
-            filas += [[recogida, m, v, fin] for m, v in valores.items() if v is not None]
+        inicio = datetime.combine(periodo, time(0), timezone.utc)
+        valores = pedir_metricas_cuenta(account_id, token, int(inicio.timestamp()),
+                                        int((inicio + timedelta(days=1)).timestamp()))
+        nuevas = {m: v for m, v in valores.items() if (dia.isoformat(), m) not in ya_hay}
+        print(f"{dia} (total del {periodo}): " + ", ".join(f"{m}={v}" for m, v in valores.items())
+              + f"  → nuevas: {', '.join(nuevas) or 'ninguna'}")
+        recogida = datetime.combine(dia, time(8), timezone.utc).isoformat(timespec="seconds")
+        fin = datetime.combine(dia, time(0), timezone.utc).isoformat(timespec="seconds")
+        filas += [[recogida, m, v, fin] for m, v in nuevas.items()]
         dia += timedelta(days=1)
 
     if prueba:

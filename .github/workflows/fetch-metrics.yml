@@ -40,6 +40,7 @@ jobs:
           git config user.name "instagram-metrics-bot"
           git config user.email "actions@users.noreply.github.com"
           git add account_metrics.csv media_metrics.csv
+          if [ -f media_info.csv ]; then git add media_info.csv; fi
           if ! git diff --cached --quiet; then
             git commit -m "Metricas: actualizacion automatica diaria"
             if ! git push; then
