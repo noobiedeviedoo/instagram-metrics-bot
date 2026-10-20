@@ -11,7 +11,9 @@ lee lo que ya escribio fetch_metrics.py.
 
 Disenada para leerse en el movil, de arriba abajo:
     1. Cuatro cifras de la semana (alcance, visualizaciones, interacciones y
-       seguidores) con el cambio frente a la semana anterior.
+       seguidores) con el cambio frente a la semana anterior, y otras cuatro de lo
+       que lleva del perfil al negocio (visitas al perfil, clics a la web,
+       seguidores nuevos y perdidos).
     2. Cuatro minigraficos, uno por metrica, con las ultimas SEMANAS_GRAFICO
        semanas dia a dia. Uno por metrica (y no todas en un grafico con dos
        ejes e indices, como antes) para que las lineas no se monten y cada
@@ -54,6 +56,7 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACCOUNT_CSV = REPO_ROOT / "account_metrics.csv"
 MEDIA_CSV = REPO_ROOT / "media_metrics.csv"
+MEDIA_INFO_CSV = REPO_ROOT / "media_info.csv"
 HASH_MARKER_PATH = REPO_ROOT / ".last_sent_chart_hash"
 
 SEMANAS_GRAFICO = 4
@@ -80,6 +83,15 @@ METRICAS = [
     ("total_interactions", "Interacciones", "suma"),
     ("followers_count", "Seguidores", "ultimo"),
 ]
+
+# Segunda fila de cifras: lo que lleva del perfil al negocio (sin minigrafico)
+METRICAS_NEGOCIO = [
+    ("profile_views", "Visitas al perfil", "suma"),
+    ("website_clicks", "Clics a tu web", "suma"),
+    ("follows", "Seguidores nuevos", "suma"),
+    ("unfollows", "Dejaron de seguirte", "suma"),
+]
+SUBIR_ES_MALO = {"unfollows"}
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
@@ -122,8 +134,9 @@ def ultimo_valor_por_dia(path: Path, metric: str) -> dict[str, int]:
 def resumen_cuenta(path: Path) -> dict | None:
     """Series diarias de las ultimas SEMANAS_GRAFICO semanas y, por metrica,
     el valor de esta semana (ultimos 7 dias con dato) frente a la anterior."""
-    series = {m: ultimo_valor_por_dia(path, m) for m, _t, _a in METRICAS}
-    todos = sorted(set().union(*series.values()))
+    todas = METRICAS + METRICAS_NEGOCIO
+    series = {m: ultimo_valor_por_dia(path, m) for m, _t, _a in todas}
+    todos = sorted(set().union(*(series[m] for m, _t, _a in METRICAS)))
     if not todos:
         return None
     fin = date.fromisoformat(todos[-1])
@@ -132,7 +145,7 @@ def resumen_cuenta(path: Path) -> dict | None:
     anterior_desde = fin - timedelta(days=13)
 
     resumen = {"fin": fin, "inicio": inicio, "semana_desde": semana_desde, "metricas": {}}
-    for metrica, titulo, agregado in METRICAS:
+    for metrica, titulo, agregado in todas:
         datos = {date.fromisoformat(d): v for d, v in series[metrica].items()}
         en_rango = sorted((d, v) for d, v in datos.items() if d >= inicio)
         esta = [v for d, v in datos.items() if semana_desde <= d <= fin]
@@ -148,8 +161,17 @@ def resumen_cuenta(path: Path) -> dict | None:
             "titulo": titulo, "agregado": agregado, "serie": en_rango, "actual": actual, "antes": antes,
             # Con que dia se compara (para "ultimo": puede ser de antes de hace 7 dias si hubo un hueco)
             "antes_fecha": max(anteriores) if agregado == "ultimo" and anteriores else None,
+            "subir_es_malo": metrica in SUBIR_ES_MALO,
         }
     return resumen
+
+
+def formatos_por_post() -> dict[str, str]:
+    """{media_id: 'reel' | 'carrusel' | 'foto' | 'vídeo'} de media_info.csv."""
+    if not MEDIA_INFO_CSV.exists():
+        return {}
+    with MEDIA_INFO_CSV.open(newline="", encoding="utf-8") as f:
+        return {row["media_id"]: row["formato"] for row in csv.DictReader(f)}
 
 
 def posts_recientes(path: Path) -> tuple[list[dict], float | None]:
@@ -178,6 +200,9 @@ def posts_recientes(path: Path) -> tuple[list[dict], float | None]:
 
     if not posts:
         return [], None
+    formatos = formatos_por_post()
+    for media_id, p in posts.items():
+        p["formato"] = formatos.get(media_id, "")
     ultimo = max(p["fecha"] for p in posts.values())
     hoy = max(ultimo, date.today())
     recientes = sorted(
@@ -232,18 +257,19 @@ def texto_cambio(m: dict) -> tuple[str, str]:
         if dif == 0:
             return f"= igual {desde}", COLOR_APAGADO
         return (f"▲ +{dif} {desde}", COLOR_SUBE) if dif > 0 else (f"▼ {dif} {desde}", COLOR_BAJA)
-    if antes == 0:
-        return "sin base para comparar", COLOR_APAGADO
-    pct = (actual - antes) / antes * 100
-    if abs(pct) < 1:
+    if actual == antes or (antes and abs(actual - antes) / antes < 0.01):
         return "= igual que la anterior", COLOR_APAGADO
-    flecha, color = ("▲", COLOR_SUBE) if pct > 0 else ("▼", COLOR_BAJA)
-    return f"{flecha} {pct:+.0f}% vs semana anterior", color
+    color = COLOR_SUBE if (actual > antes) != m.get("subir_es_malo", False) else COLOR_BAJA
+    flecha = "▲" if actual > antes else "▼"
+    if antes < 20:
+        # Con cifras pequenas el porcentaje engana (de 2 a 8 = "+300%"): mejor la diferencia
+        return f"{flecha} {actual - antes:+d} (la anterior: {antes})", color
+    return f"{flecha} {(actual - antes) / antes * 100:+.0f}% vs la anterior", color
 
 
 def dibujar_cifra(ax, m: dict):
     ax.axis("off")
-    ax.text(0, 0.92, m["titulo"] + (" (semana)" if m["agregado"] == "suma" else ""),
+    ax.text(0, 0.92, m["titulo"],
             fontsize=10, color=COLOR_TEXTO_2, transform=ax.transAxes, va="top")
     valor = miles(m["actual"]) if m["actual"] is not None else "—"
     ax.text(0, 0.62, valor, fontsize=22, fontweight="bold", color=COLOR_TEXTO, transform=ax.transAxes, va="top")
@@ -310,7 +336,8 @@ def dibujar_posts(ax, posts: list[dict], mediana: float | None):
         ax.axis("off")
         return
     filas = posts[::-1]  # la mas reciente arriba
-    etiquetas = [f"{etiqueta_corta(p['caption'])}  ·  {fecha_corta(p['fecha'])}" for p in filas]
+    etiquetas = [f"{etiqueta_corta(p['caption'], 22)}  ·  {p['formato'] + ', ' if p['formato'] else ''}"
+                 f"{fecha_corta(p['fecha'])}" for p in filas]
     valores = [p["reach"] for p in filas]
     barras = ax.barh(range(len(filas)), valores, color=COLOR_SERIE, height=0.55, zorder=3)
     ax.bar_label(barras, labels=[miles(v) for v in valores], padding=4, fontsize=9, color=COLOR_TEXTO)
@@ -332,24 +359,34 @@ def dibujar_posts(ax, posts: list[dict], mediana: float | None):
 
 def generar_grafico(resumen: dict, posts: list[dict], mediana: float | None, destino: str):
     n_posts = max(len(posts), 2)
-    fig = plt.figure(figsize=(8, 10.5 + 0.35 * n_posts), facecolor=COLOR_FONDO)
+    fig = plt.figure(figsize=(8, 11.6 + 0.35 * n_posts), facecolor=COLOR_FONDO)
     gs = fig.add_gridspec(
-        4, 4, height_ratios=[0.6, 1.6, 1.6, 0.55 + 0.32 * n_posts],
+        5, 4, height_ratios=[0.6, 0.6, 1.6, 1.6, 0.55 + 0.32 * n_posts],
         left=0.06, right=0.95, top=0.91, bottom=0.04, hspace=0.45, wspace=0.35,
     )
     fig.text(0.06, 0.965, "Instagram · resumen semanal", fontsize=17, fontweight="bold", color=COLOR_TEXTO)
     fig.text(0.06, 0.94, f"Semana del {fecha_corta(resumen['semana_desde'])} al {fecha_corta(resumen['fin'])}"
-             "  ·  zona sombreada = esta semana", fontsize=10, color=COLOR_TEXTO_2)
+             "  ·  cifras de la semana, comparadas con la anterior", fontsize=10, color=COLOR_TEXTO_2)
 
     metricas = [resumen["metricas"][m] for m, _t, _a in METRICAS]
     for i, m in enumerate(metricas):
         dibujar_cifra(fig.add_subplot(gs[0, i]), m)
-    posiciones = [gs[1, 0:2], gs[1, 2:4], gs[2, 0:2], gs[2, 2:4]]
-    for pos, m in zip(posiciones, metricas):
-        dibujar_minigrafico(fig.add_subplot(pos), m, resumen)
+    for i, (clave, _t, _a) in enumerate(METRICAS_NEGOCIO):
+        ax = fig.add_subplot(gs[1, i])
+        dibujar_cifra(ax, resumen["metricas"][clave])
+        if i == 0:
+            ax.text(0, 1.25, "DEL PERFIL A TU NEGOCIO", transform=ax.transAxes, fontsize=9,
+                    fontweight="bold", color=COLOR_APAGADO)
+    posiciones = [gs[2, 0:2], gs[2, 2:4], gs[3, 0:2], gs[3, 2:4]]
+    for i, (pos, m) in enumerate(zip(posiciones, metricas)):
+        ax = fig.add_subplot(pos)
+        dibujar_minigrafico(ax, m, resumen)
+        if i == 0:
+            ax.text(0, 1.22, f"DÍA A DÍA, ÚLTIMAS {SEMANAS_GRAFICO} SEMANAS  ·  sombreado = esta semana",
+                    transform=ax.transAxes, fontsize=9, fontweight="bold", color=COLOR_APAGADO)
 
     # Columna de etiquetas a la izquierda para los posts: el panel empieza mas a la derecha
-    ax_posts = fig.add_subplot(gs[3, :])
+    ax_posts = fig.add_subplot(gs[4, :])
     caja = ax_posts.get_position()
     ax_posts.set_position([caja.x0 + 0.3, caja.y0, caja.width - 0.3, caja.height])
     dibujar_posts(ax_posts, posts, mediana)

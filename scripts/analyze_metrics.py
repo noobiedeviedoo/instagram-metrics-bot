@@ -26,7 +26,7 @@ from pathlib import Path
 
 import requests
 
-from send_weekly_chart import fecha_corta, resumen_cuenta
+from send_weekly_chart import fecha_corta, formatos_por_post, resumen_cuenta
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACCOUNT_CSV = REPO_ROOT / "account_metrics.csv"
@@ -47,8 +47,10 @@ Estructura, de 80 a 150 palabras en total:
 1. Una frase titular con lo más importante de la semana: el cambio más grande, para bien o para \
 mal, con su cifra.
 2. Dos o tres hechos concretos que hayan cambiado respecto a la semana anterior, con números. \
-Si hay publicaciones nuevas, compáralas con su mediana (alcance, y guardados y compartidos por cada \
-100 cuentas alcanzadas: dicen más que los likes).
+Da prioridad a lo que lleva al negocio: visitas al perfil, clics al enlace de la web y seguidores \
+ganados y perdidos. Si hay publicaciones nuevas, compáralas con su mediana y con su formato \
+(alcance, y guardados y compartidos por cada 100 cuentas alcanzadas: dicen más que los likes). \
+Con cifras pequeñas (menos de 20) habla en unidades, no en porcentajes.
 3. Una sola recomendación concreta y comprobable para la semana que viene (qué publicar, cuándo \
 o en qué formato), apoyada en los datos. Si el informe anterior dio una recomendación, di \
 primero en una frase si se siguió y si funcionó según los datos.
@@ -96,6 +98,16 @@ def cifras_de_la_semana() -> str:
         lineas.append(f"- Seguidores: {seg['actual']} ({seg['actual'] - seg['antes']:+d} desde el {fecha_corta(seg['antes_fecha'])}).")
     elif seg["actual"] is not None:
         lineas.append(f"- Seguidores: {seg['actual']}.")
+    lineas.append("Del perfil al negocio (lo que más importa: así llegan los clientes):")
+    for clave in ("profile_views", "website_clicks", "follows", "unfollows"):
+        datos = m[clave]
+        if datos["actual"] is None:
+            continue
+        antes = f" (semana anterior: {datos['antes']})" if datos["antes"] is not None else ""
+        lineas.append(f"- {datos['titulo']}: {datos['actual']}{antes}.")
+    visitas, clics = m["profile_views"]["actual"], m["website_clicks"]["actual"]
+    if visitas and clics is not None:
+        lineas.append(f"- De cada 100 visitas al perfil, {clics / visitas * 100:.1f} pulsan el enlace de la web.")
     semana = [(d, v) for d, v in m["reach"]["serie"] if d >= resumen["semana_desde"]]
     if len(semana) >= 3:
         mejor = max(semana, key=lambda p: p[1])
@@ -115,7 +127,8 @@ def publicaciones(resumen: dict) -> str:
     with MEDIA_CSV.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             post = posts.setdefault(row.get("media_id", ""), {
-                "fecha": row.get("posted_at_utc", "")[:10], "caption": row.get("caption_excerpt", ""), "m": {}})
+                "id": row.get("media_id", ""), "fecha": row.get("posted_at_utc", "")[:10],
+                "caption": row.get("caption_excerpt", ""), "m": {}})
             anterior = post["m"].get(row.get("metric", ""))
             if anterior is None or row.get("fetched_at_utc", "") >= anterior[1]:
                 try:
@@ -138,12 +151,26 @@ def publicaciones(resumen: dict) -> str:
     lineas = [f"- Mediana de tus publicaciones de los últimos 90 días ({len(base)} posts): alcance {med_alcance:.0f}, "
               f"guardados {med_guardados:.1f} y compartidos {med_compartidos:.1f} por cada 100 cuentas alcanzadas."]
 
+    # Por formato (reel, carrusel, foto...): la comparacion que mas ayuda a decidir que publicar
+    formatos = formatos_por_post()
+    for p in posts.values():
+        p["formato"] = formatos.get(p.get("id", ""), "")
+    grupos: dict[str, list] = {}
+    for p in base:
+        if p["formato"]:
+            grupos.setdefault(p["formato"], []).append(p)
+    if len(grupos) > 1:
+        lineas.append("- Por formato (últimos 90 días; con menos de 3 posts no es fiable):")
+        for nombre, grupo in sorted(grupos.items(), key=lambda g: -len(g[1])):
+            lineas.append(f"  · {nombre}: {len(grupo)} posts, alcance mediano {mediana([q['m']['reach'][0] for q in grupo]):.0f}, "
+                          f"compartidos {mediana([ratio(q, 'shares') for q in grupo]):.1f}/100.")
+
     semana = sorted((p for p in base if p["fecha"] >= resumen["semana_desde"].isoformat()), key=lambda p: p["fecha"])
     por_semana = len(base) / (90 / 7)
     lineas.append(f"- Publicaciones esta semana: {len(semana)} (lo habitual: {por_semana:.1f} por semana).")
     for p in semana:
         texto = (p["caption"] or "sin texto").replace("\n", " ")[:60]
-        lineas.append(f"  · {p['fecha']} «{texto}»: alcance {p['m']['reach'][0]} (aún creciendo), "
+        lineas.append(f"  · {p['fecha']} {p['formato'] or ''} «{texto}»: alcance {p['m']['reach'][0]} (aún creciendo), "
                       f"guardados {ratio(p, 'saved'):.1f}/100, compartidos {ratio(p, 'shares'):.1f}/100.")
     if not semana:
         ultima = max(base, key=lambda p: p["fecha"])
