@@ -50,3 +50,14 @@ jobs:
           else
             echo "Sin cambios que commitear."
           fi
+
+      # Del 1 al 20 de octubre de 2026 fallo a diario (token caducado) sin que nadie se enterase
+      - name: Avisar por Telegram si ha fallado
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=⚠️ Ha fallado la recogida diaria de métricas de Instagram. Revisa: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

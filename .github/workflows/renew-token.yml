@@ -1,0 +1,54 @@
+name: Renovar token de Instagram (programado)
+
+# El token de larga duracion de Instagram caduca a los 60 dias. Renovandolo
+# antes vuelve a durar 60 dias desde ese momento, asi que con hacerlo cada
+# semana no caduca nunca. Se guarda en los Secrets de los dos bots que lo usan
+# (este y automatizacion-instagram), por eso hace falta GH_PAT: un token de
+# GitHub con permiso de escribir Secrets en esos dos repos (el GITHUB_TOKEN
+# integrado no puede tocar Secrets). Si algo falla, avisa por Telegram.
+#
+# Ojo: solo se puede renovar un token que aun no haya caducado y que tenga mas
+# de 24 h. Si caduca (p. ej. porque este workflow lleva semanas fallando), hay
+# que generar uno nuevo a mano en developers.facebook.com.
+
+on:
+  schedule:
+    - cron: "0 4 * * 0" # domingos 04:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  renew-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Renovar token y guardarlo en los dos repos
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          respuesta=$(curl -s "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${IG_ACCESS_TOKEN}")
+          nuevo=$(echo "$respuesta" | jq -r '.access_token // empty')
+          if [ -z "$nuevo" ]; then
+            echo "Instagram no ha devuelto un token nuevo:"
+            echo "$respuesta" | jq -c '.error // .'
+            exit 1
+          fi
+          echo "::add-mask::$nuevo"
+          dias=$(( $(echo "$respuesta" | jq -r '.expires_in') / 86400 ))
+          for repo in noobiedeviedoo/instagram-metrics-bot noobiedeviedoo/automatizacion-instagram; do
+            gh secret set IG_ACCESS_TOKEN --repo "$repo" --body "$nuevo"
+          done
+          echo "Token renovado en los dos repos: caduca dentro de $dias dias."
+
+      - name: Avisar por Telegram si ha fallado
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=⚠️ No se ha podido renovar el token de Instagram. Si caduca, dejarán de funcionar las métricas y las publicaciones programadas. Revisa: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
