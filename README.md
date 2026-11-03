@@ -252,6 +252,7 @@ instagram-metrics-bot/
 ├── weekly_analysis.txt          # Lo escribe analyze_metrics.py cada semana
 ├── .last_sent_analysis_hash     # Lo escribe speak-analysis.yml, evita duplicar el audio
 ├── .last_sent_chart_hash        # Lo escribe speak-analysis.yml, evita duplicar el grafico
+├── .last_sent_week              # Semana ISO del ultimo reporte enviado: corta los lanzamientos repetidos de cron-job.org antes de llamar a Claude
 ├── requirements.txt
 ├── .env.example
 ├── .gitattributes

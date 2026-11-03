@@ -9,10 +9,21 @@ on:
     # Ojo: GitHub Actions programa siempre en UTC, no ajusta por DST — en
     # invierno (UTC+1) el mensaje llegara a las 07:00 hora local en vez de 08:00.
     - cron: "0 6 * * 1"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      forzar:
+        description: "Mandar aunque ya se haya mandado esta semana"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+# Si cron-job.org lanza otra ejecucion mientras una sigue en marcha, la
+# nueva espera a que termine (y entonces ya ve el marcador de la semana).
+concurrency:
+  group: reporte-semanal-instagram
+  cancel-in-progress: false
 
 jobs:
   speak-analysis:
@@ -21,15 +32,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Comprobar si ya se mando el reporte esta semana
+        # cron-job.org lanza este workflow varias veces cada lunes (respaldo
+        # por los retrasos del schedule de GitHub). El hash de
+        # .last_sent_analysis_hash NO sirve para evitar duplicados: el
+        # analisis se regenera con la API de Claude en cada ejecucion y nunca
+        # sale igual, asi que el audio/mensaje se mandaba en cada lanzamiento
+        # (y se pagaba un analisis cada vez). Este marcador guarda la semana
+        # ISO (UTC) del ultimo envio correcto y corta todo ANTES de llamar a
+        # Claude. Para forzar un envio a mano: lanzar con forzar = true.
+        id: guard
+        run: |
+          semana=$(date -u +%G-W%V)
+          echo "semana=$semana" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.forzar }}" != "true" ] && [ -f .last_sent_week ] && [ "$(cat .last_sent_week)" = "$semana" ]; then
+            echo "El reporte de la semana $semana ya se mando — no se repite."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Configurar Python
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Instalar dependencias
+        if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
       - name: Analizar los datos con la API de Claude
+        if: steps.guard.outputs.skip != 'true'
         # Se movio aqui desde fetch-metrics.yml: ese workflow ahora corre a
         # diario solo para ir guardando metricas (sin gastar tokens de la API
         # de Anthropic cada dia), y el analisis en si se sigue generando una
@@ -44,12 +78,14 @@ jobs:
         run: python scripts/analyze_metrics.py
 
       - name: Generar audio y mandarlo por Telegram
+        if: steps.guard.outputs.skip != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/send_weekly_audio.py
 
       - name: Generar grafico y mandarlo por Telegram
+        if: steps.guard.outputs.skip != 'true'
         # continue-on-error: si esto falla (p.ej. un problema de matplotlib)
         # no debe impedir que se comitee el marcador del audio, que ya se
         # mando bien en el paso anterior.
@@ -60,9 +96,14 @@ jobs:
         run: python scripts/send_weekly_chart.py
 
       - name: Commit del analisis y de los marcadores de "ya enviado"
+        if: steps.guard.outputs.skip != 'true'
         run: |
           git config user.name "instagram-metrics-bot"
           git config user.email "actions@users.noreply.github.com"
+          # Si se llega aqui, el envio por Telegram fue bien (el paso de
+          # envio no tiene continue-on-error): se marca la semana.
+          echo "${{ steps.guard.outputs.semana }}" > .last_sent_week
+          git add .last_sent_week
           # weekly_analysis.txt solo existe/cambia si el paso de analisis de
           # arriba llego a escribirlo (tiene continue-on-error, asi que puede
           # no haberse actualizado esta vez) — comprobacion aparte para que
